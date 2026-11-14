@@ -47,8 +47,9 @@ class StreamAsrModule : Module() {
   // here, so the handshake does not swallow the first words.
   private val connecting = AtomicBoolean(false)
   private val pending = ArrayDeque<ByteArray>()
-  // 0 while the speaker plays; the moment it may fall silent, else. Millis.
-  private val speakerUntil = java.util.concurrent.atomic.AtomicLong(-1L)
+  // Whether the app is playing the bot's voice; logged, and the hook for a
+  // future reference echo canceller.
+  private val speakerOn = AtomicBoolean(false)
   // A call's socket waits this long for the next utterance before it closes itself.
   private val idleCloser = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { runnable ->
     Thread(runnable).apply { isDaemon = true }
@@ -135,15 +136,10 @@ class StreamAsrModule : Module() {
     }
 
     Function("notePlayback") { active: Boolean ->
-      // The speaker's own playback, told by the app that plays it. While it runs,
-      // the raw microphone hears the bot as loudly as the caller; the gate below
-      // learns that echo and only forwards speech that talks over it.
-      if (active) {
-        speakerUntil.set(0L)
-      } else {
-        // Clips of one reply follow each other closely; stay gated through the gaps.
-        speakerUntil.set(android.os.SystemClock.elapsedRealtime() + 2_000)
-      }
+      // The speaker's own playback, told by the app that plays it. The raw
+      // microphone hears it too; the transcript-level echo filter drops it, and
+      // this note stays as the hook for a future reference canceller.
+      speakerOn.set(active)
       note("speaker ${if (active) "on" else "off"}")
     }
 
@@ -280,10 +276,6 @@ class StreamAsrModule : Module() {
       var sent = 0L
       var quietFrames = 0
       var windowPeak = 0
-      // The echo gate: learned while the speaker plays, in the mic's own thread.
-      var echoPeak = 0.0
-      var learnFrames = 0
-      var gated = 0L
       val buffer = ByteArray(frameBytes)
       while (!closing.get()) {
         val read = try {
@@ -305,36 +297,12 @@ class StreamAsrModule : Module() {
         }
         if (peak > windowPeak) windowPeak = peak
         if (peak < 128) quietFrames += 1 else quietFrames = 0
-        val speakerOn = speakerUntil.get() == 0L ||
-          (speakerUntil.get() > 0 && android.os.SystemClock.elapsedRealtime() < speakerUntil.get())
-        var echo = false
-        if (speakerOn) {
-          if (learnFrames < 15) {
-            // The reply's opening: the caller rarely talks into it, so what the
-            // mic hears here is the speaker's own echo.
-            learnFrames += 1
-            if (peak > echoPeak) echoPeak = peak.toDouble()
-            echo = true
-          } else {
-            val gate = maxOf(echoPeak * 2.5, 400.0)
-            if (peak < gate) {
-              echo = true
-              if (peak > echoPeak) echoPeak = peak.toDouble()
-            }
-          }
-        } else {
-          learnFrames = 0
-          echoPeak = 0.0
-        }
         if (sent % 50 == 0L) {
-          note("mic level: frame=$sent peak=$windowPeak quiet=$quietFrames gated=$gated")
+          note(
+            "mic level: frame=$sent peak=$windowPeak quiet=$quietFrames speaker=${speakerOn.get()}",
+          )
           windowPeak = 0
           quietFrames = 0
-          gated = 0
-        }
-        if (echo) {
-          gated += 1
-          continue
         }
         var dead = false
         synchronized(pending) {

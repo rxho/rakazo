@@ -13,15 +13,43 @@ const CONTRACTIONS: Record<string, string> = {
   d: "would",
 };
 
-/** Dictation writes out what speech contracts, so "I'm" must compare equal to "I am". */
-function words(text: string): string[] {
-  return text
+/** CJK writing carries no spaces, so its tokens are character bigrams instead of words. */
+const CJK = /[\u2e80-\u9fff\uf900-\ufaff]/;
+
+/** Latin words, and CJK character bigrams: comparable tokens for either writing. */
+export function words(text: string): string[] {
+  const cleaned = text
     .toLowerCase()
     .replace(/n['’]t\b/g, " not")
     .replace(/['’](m|re|s|ll|ve|d)\b/g, (_match, tail: string) => ` ${CONTRACTIONS[tail]}`)
-    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
-    .split(/\s+/)
-    .filter(Boolean);
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ");
+  const out: string[] = [];
+  let latin = "";
+  let cjk = "";
+  const flushLatin = () => {
+    if (latin) out.push(latin);
+    latin = "";
+  };
+  const flushCjk = () => {
+    for (let i = 0; i + 1 < cjk.length; i += 1) out.push(cjk.slice(i, i + 2));
+    if (cjk.length === 1) out.push(cjk);
+    cjk = "";
+  };
+  for (const ch of cleaned) {
+    if (CJK.test(ch)) {
+      flushLatin();
+      cjk += ch;
+    } else if (ch.trim()) {
+      flushCjk();
+      latin += ch;
+    } else {
+      flushLatin();
+      flushCjk();
+    }
+  }
+  flushLatin();
+  flushCjk();
+  return out;
 }
 
 /**
@@ -41,7 +69,12 @@ export function isEchoOfSpeech(
 ): boolean {
   const heardWords = words(heard);
   const spokenWords = words(spoken);
+  const single = heardWords.length === 1 ? heardWords[0] : undefined;
   if (heardWords.length > MAX_ECHO_WORDS || !spokenWords.length) return false;
+  // A two-character phrase in CJK is one bigram: the speaker said exactly it.
+  if (single !== undefined && single.length === 2 && CJK.test(single)) {
+    return spokenWords.includes(single);
+  }
   if (heardWords.length === 2) {
     return spokenWords.some(
       (word, i) => word === heardWords[0] && spokenWords[i + 1] === heardWords[1],

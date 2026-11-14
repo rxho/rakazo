@@ -42,6 +42,30 @@ describe("call barge-in", () => {
     expect(isCallBargeIn("   ")).toBe(false);
     expect(isInterimCallBargeIn("")).toBe(false);
   });
+
+  it("lets a Chinese phrase cut a reply short", () => {
+    expect(isCallBargeIn("我在深圳工作")).toBe(true);
+    expect(isInterimCallBargeIn("我在深圳")).toBe(true);
+  });
+
+  it.each(["停", "等等！", "等一下", "别说了"])(
+    "lets the interruption %j cut a reply short",
+    (text) => {
+      expect(isCallBargeIn(text)).toBe(true);
+    },
+  );
+
+  it("keeps playing through a one-character backchannel", () => {
+    expect(isCallBargeIn("嗯")).toBe(false);
+    expect(isInterimCallBargeIn("好")).toBe(false);
+  });
+
+  it("ignores the Chinese reply leaking back into the microphone", () => {
+    spokenMemory.remember("你好，今天天气怎么样？");
+    expect(isCallBargeIn("今天天气怎么样")).toBe(false);
+    expect(isInterimCallBargeIn("你好，今天天气")).toBe(false);
+    expect(isCallBargeIn("拜拜")).toBe(true); // not something the bot just said
+  });
 });
 
 describe("interim barge-in countdown", () => {
