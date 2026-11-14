@@ -3,12 +3,13 @@ import type { Duplex } from "node:stream";
 import type { StreamAsrOpener, StreamAsrSession } from "@rakazo/adapters";
 import { funAsrStreamAsr } from "@rakazo/adapters";
 import type { Actor, SettingsScope } from "@rakazo/contracts";
+import { VOICE_ASR_CONNECT_PATH } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
 import type { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
 
-/** Where the app's streaming recognizer connects; every other upgrade stays refused. */
-export const VOICE_ASR_CONNECT_PATH = "/api/voice/asr";
+/** Where the app's streaming recognizer connects; shared with the web proxy's upgrade routes. */
+export { VOICE_ASR_CONNECT_PATH };
 
 /** One audio frame the app sends; larger frames are refused, not truncated. */
 const MAX_FRAME_BYTES = 32 * 1024;

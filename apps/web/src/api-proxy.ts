@@ -1,19 +1,24 @@
 import { isIP } from "node:net";
 import { USER_DEVICE_CONNECT_PATH } from "@rakazo/contracts/user-devices";
+import { VOICE_ASR_CONNECT_PATH } from "@rakazo/contracts/voice-asr";
 import type { ProxyOptions } from "vite";
 import { appendForwardedFor } from "./forwarded-for.js";
 
 /** Vite treats a proxy key starting with `^` as a pattern for the request's path and query. */
 export const DEVICE_SOCKET = `^${USER_DEVICE_CONNECT_PATH}(?:\\?|$)`;
+/** The call recognizer's relay: the app's only other long-lived API socket. */
+export const VOICE_ASR_SOCKET = `^${VOICE_ASR_CONNECT_PATH}(?:\\?|$)`;
 
 /**
  * What the web server forwards to the API, keyed the way Vite's proxy matches: a prefix, or a
- * pattern when the key starts with `^`. True marks the only route that forwards upgrades: a
- * user's own computer keeps its device socket open there, so it is anchored to the exact path.
+ * pattern when the key starts with `^`. True marks a route that forwards upgrades: a user's
+ * own computer keeps its device socket open on one, a call's recognizer on the other; both
+ * are anchored to the exact path.
  */
 export const API_ROUTES: Readonly<Record<string, boolean>> = {
   "/api": false,
   [DEVICE_SOCKET]: true,
+  [VOICE_ASR_SOCKET]: true,
   "/rpc": false,
   // Native app domain association, served by the API from deployment settings.
   "/.well-known/apple-app-site-association": false,
