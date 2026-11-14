@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SpeechRecognizer } from "./dictation";
 import {
   ENDPOINT_SILENCE_MS,
+  FINAL_REVISION_WAIT_MS,
   finishListening,
   listen,
   QUIET_RESTART_MS,
@@ -443,6 +444,7 @@ describe("server streaming dictation", () => {
       fail: (message: string) => emit("onError", { message }),
       end: () => emit("onEnd", undefined),
       started: module.start,
+      stopped: module.stop,
       aborted: module.abort,
     };
   }
@@ -470,28 +472,31 @@ describe("server streaming dictation", () => {
     vi.useRealTimers();
   });
 
-  it("trims whole-so-far revisions into growing interims and new-sentence finals", async () => {
+  it("joins the live decoder's windows and takes the server's revision as the final", async () => {
     const fake = fakeStreamAsr();
     setStreamAsrModule(fake.module);
     setServerAsr({ url: "wss://api/api/voice/asr", headers: {} });
     const heard = collect();
     await vi.advanceTimersByTimeAsync(0);
 
+    // The live decoder sends short windows of the words being spoken, not revisions.
     fake.say("你好", false);
     expect(heard.interim).toEqual(["你好"]);
-    fake.say("你好我是", false);
+    fake.say("我是", false);
     expect(heard.interim).toEqual(["你好", "你好我是"]);
     // The finalized revision covers everything the interim guessed.
     fake.say("你好，我是。", true);
     expect(heard.final).toEqual([]);
     expect(heard.interim.at(-1)).toBe("你好，我是。");
     // The next utterance starts over without repeating the banked one.
-    fake.say("你好，我是。今天", false);
-    expect(heard.interim.at(-1)).toBe("你好，我是。 今天");
-    fake.say("今天天气好。", true);
-    // The silence window after the last words ends the turn with both sentences.
-    await vi.advanceTimersByTimeAsync(ENDPOINT_SILENCE_MS + 10);
-    expect(heard.final).toEqual(["你好，我是。 今天天气好。"]);
+    fake.say("今天", false);
+    expect(heard.interim.at(-1)).toBe("你好，我是。今天");
+    fake.say("天气好。", false);
+    // The silence window after the last words ends the utterance; the turn is
+    // delivered once the ended utterance's revision had its chance to land.
+    await vi.advanceTimersByTimeAsync(ENDPOINT_SILENCE_MS + FINAL_REVISION_WAIT_MS + 10);
+    expect(fake.stopped).toHaveBeenCalledTimes(1);
+    expect(heard.final).toEqual(["你好，我是。今天天气好。"]);
   });
 
   it("starts the native stream with the call's signed target", async () => {
@@ -520,7 +525,7 @@ describe("server streaming dictation", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
     native.fail("connection refused");
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FINAL_REVISION_WAIT_MS + 10);
     expect(gave).toEqual(["failed"]);
   });
 });

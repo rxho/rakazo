@@ -43,6 +43,26 @@ class StreamAsrModule : Module() {
   // Between one utterance's stop and the next start the mic keeps rolling, but
   // its audio belongs to no utterance and is not forwarded.
   private val forwarding = AtomicBoolean(true)
+  // True from start() until the socket opens: mic frames captured meanwhile wait
+  // here, so the handshake does not swallow the first words.
+  private val connecting = AtomicBoolean(false)
+  private val pending = ArrayDeque<ByteArray>()
+  // A call's socket waits this long for the next utterance before it closes itself.
+  private val idleCloser = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { runnable ->
+    Thread(runnable).apply { isDaemon = true }
+  }
+  private var idleClose: java.util.concurrent.ScheduledFuture<*>? = null
+
+  private fun armIdleClose() {
+    cancelIdleClose()
+    idleClose = idleCloser.schedule({ stopNow("idle between utterances") }, 20, TimeUnit.SECONDS)
+  }
+
+  private fun cancelIdleClose() {
+    idleClose?.cancel(false)
+    idleClose = null
+  }
+
   private val client = OkHttpClient.Builder()
     .pingInterval(25, TimeUnit.SECONDS)
     .connectTimeout(10, TimeUnit.SECONDS)
@@ -79,6 +99,7 @@ class StreamAsrModule : Module() {
         // of decoder threads is small, and a fresh connection per utterance
         // exhausts it a few turns into a call.
         note("start: reusing the open recognizer socket")
+        cancelIdleClose()
         send(JSONObject().put("type", "start").put("lang", lang))
         forwarding.set(true)
         promise.resolve(true)
@@ -87,7 +108,13 @@ class StreamAsrModule : Module() {
       note("start: opening $url lang=$lang")
       stopNow("superseded by start")
       closing.set(false)
-      val started = open(url, headers, lang)
+      connecting.set(true)
+      val gen = generation.incrementAndGet()
+      // The microphone opens now, not when the socket does: the first words of
+      // a call are spoken the moment the caller hears the ring end, and the
+      // handshake takes over a second.
+      startMicrophone(gen)
+      val started = open(url, headers, lang, gen)
       if (started == null) {
         note("start: relay refused the connection")
         stopNow("open refused")
@@ -102,6 +129,7 @@ class StreamAsrModule : Module() {
       note("utterance stop")
       send(JSONObject().put("type", "stop"))
       forwarding.set(false)
+      armIdleClose()
     }
 
     Function("abort") {
@@ -116,10 +144,9 @@ class StreamAsrModule : Module() {
   }
 
   /** Opens the relay socket; null when the address was refused outright. */
-  private fun open(url: String, headers: Map<String, String>, lang: String): WebSocket? {
+  private fun open(url: String, headers: Map<String, String>, lang: String, gen: Int): WebSocket? {
     val builder = Request.Builder().url(url)
     for ((name, value) in headers) builder.header(name, value)
-    val gen = generation.incrementAndGet()
     val opened = java.util.concurrent.CountDownLatch(1)
     var accepted = false
     val socket = client.newWebSocket(
@@ -132,11 +159,16 @@ class StreamAsrModule : Module() {
             return
           }
           note("socket open, starting microphone")
+          cancelIdleClose()
           send(JSONObject().put("type", "start").put("lang", lang))
-          forwarding.set(true)
+          // The mic thread flushes what it captured during the handshake itself,
+          // under the same lock it sends with, so nothing reorders or doubles.
+          synchronized(pending) {
+            forwarding.set(true)
+            connecting.set(false)
+          }
           accepted = true
           opened.countDown()
-          startMicrophone(gen)
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -226,13 +258,31 @@ class StreamAsrModule : Module() {
         }
         if (read <= 0) continue
         val chunk = if (read == frameBytes) buffer else buffer.copyOf(read)
-        if (!forwarding.get()) continue // Between utterances: the gap is no one's speech.
-        val target = socket
-        if (target == null || !target.send(chunk.toByteString())) {
+        var dead = false
+        synchronized(pending) {
+          val target = socket
+          if (target != null && forwarding.get()) {
+            // In order: whatever the handshake buffered, then this frame.
+            while (pending.isNotEmpty()) {
+              val buffered = pending.removeFirst()
+              if (!target.send(buffered.toByteString())) {
+                dead = true
+                break
+              }
+              sent += 1
+            }
+            if (!dead && !target.send(chunk.toByteString())) dead = true
+            if (!dead) sent += 1
+          } else if (connecting.get() && pending.size < 100) {
+            // The handshake is still running: these words must not be lost to it.
+            pending.addLast(chunk)
+          }
+          // Between utterances the gap is no one's speech: dropped.
+        }
+        if (dead) {
           note("mic send failed after $sent frames (socket gone)")
           break
         }
-        sent += 1
       }
       note("mic thread exit after $sent frames, closing=${closing.get()}")
     }
@@ -254,6 +304,9 @@ class StreamAsrModule : Module() {
     generation.incrementAndGet() // Any callback still in flight belongs to a dead session.
     closing.set(true)
     forwarding.set(false)
+    connecting.set(false)
+    cancelIdleClose()
+    synchronized(pending) { pending.clear() }
     note("stopping: $reason")
     try {
       recorder?.stop()
