@@ -1053,7 +1053,12 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   // upgrade listener in `handleUpgrade`.
   const voiceAsr = createVoiceAsrUpgradeHandler({
     resolve: async (actor, scope) => {
-      const address = await defaultVoiceAsrStreamUrl({ prisma, secrets, env }, actor, scope);
+      // Upgrades carry no request context, so the saved-address lookup states
+      // its own system scope instead of tripping row security mid-handshake.
+      const address = await runAsSystem(
+        "the voice asr relay reads the caller's saved recognizer address",
+        () => defaultVoiceAsrStreamUrl({ prisma, secrets, env }, actor, scope),
+      );
       return address ? { address } : null;
     },
     authenticate: async (request) => {
