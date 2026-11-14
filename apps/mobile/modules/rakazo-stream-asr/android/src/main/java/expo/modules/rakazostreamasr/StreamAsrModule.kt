@@ -233,11 +233,13 @@ class StreamAsrModule : Module() {
       AudioFormat.CHANNEL_IN_MONO,
       AudioFormat.ENCODING_PCM_16BIT,
     )
-    // The unprocessed source first: the communication source's echo cancelling
-    // eats the caller's own words whenever the speaker is playing — the head of
-    // a reply spoken over the greeting, or a cut-in spoken over the bot — and
-    // the bot's echo in what remains is filtered by the app's own logic.
+    // The recognition source first: it is built for listening to speech — no
+    // telephony echo cancelling to eat words spoken over playback (the
+    // communication source's habit), and unlike the unprocessed source it keeps
+    // capturing across a process's many sessions, where some devices hand out
+    // silent streams after the first few recorders.
     val sources = listOf(
+      MediaRecorder.AudioSource.VOICE_RECOGNITION,
       MediaRecorder.AudioSource.UNPROCESSED,
       MediaRecorder.AudioSource.VOICE_COMMUNICATION,
     )
@@ -359,8 +361,13 @@ class StreamAsrModule : Module() {
     } catch (_: Exception) {
       // Already stopped.
     }
-    recording?.interrupt()
+    val thread = recording
     recording = null
+    thread?.interrupt()
+    // A native read blocks past interrupts; give the thread a beat to leave the
+    // old recorder before another takes the input, or some devices hand the
+    // next capture a silent stream.
+    thread?.join(300)
     recorder?.release()
     recorder = null
     try {
