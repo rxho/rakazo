@@ -937,6 +937,28 @@ export function speechClipType(bytes: Uint8Array): { mimeType: string; extension
  */
 const PAUSE_ABANDON_MS = 120_000;
 
+// The call's microphone module hears the speaker too; told that playback runs,
+// it learns that echo and lets only speech that talks over it through.
+let noteSpeaker: ((active: boolean) => void) | null | undefined;
+
+function noteSpeakerPlayback(active: boolean): void {
+  if (noteSpeaker === undefined) {
+    noteSpeaker = null;
+    if (Platform.OS === "android") {
+      void import("expo-modules-core")
+        .then(({ requireNativeModule }) => {
+          const native = requireNativeModule<{ notePlayback(active: boolean): void }>(
+            "RakazoStreamAsr",
+          );
+          if (typeof native?.notePlayback === "function")
+            noteSpeaker = (on) => native.notePlayback(on);
+        })
+        .catch(() => undefined);
+    }
+  }
+  noteSpeaker?.(active);
+}
+
 export async function playSpeechClip(bytes: Uint8Array, session?: HostedSession): Promise<void> {
   const AudioCtor = (globalThis as { Audio?: typeof Audio }).Audio;
   if (typeof AudioCtor === "function") {
@@ -1016,6 +1038,7 @@ async function playWithNativeAudio(bytes: Uint8Array, session?: HostedSession): 
     await activateAudio();
     if (!onCall) await setAudioModeAsync(READ_ALOUD_AUDIO);
   });
+  if (onCall) noteSpeakerPlayback(true);
   const file = new File(
     Paths.cache,
     `rakazo-voice-${Date.now()}.${speechClipType(bytes).extension}`,
@@ -1093,6 +1116,7 @@ async function playWithNativeAudio(bytes: Uint8Array, session?: HostedSession): 
       }
     });
   } finally {
+    if (onCall) noteSpeakerPlayback(false);
     player.release();
     try {
       file.delete();
