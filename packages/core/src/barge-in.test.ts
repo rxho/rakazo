@@ -66,6 +66,14 @@ describe("call barge-in", () => {
     expect(isInterimCallBargeIn("你好，今天天气")).toBe(false);
     expect(isCallBargeIn("拜拜")).toBe(true); // not something the bot just said
   });
+
+  it("ignores a short sliver of the reply the live recognizer sends", () => {
+    spokenMemory.remember("猜猜我是谁，我在深圳工作。");
+    // The recognizer's windows of the speaker's echo are two or three characters.
+    expect(isInterimCallBargeIn("猜猜我")).toBe(false);
+    expect(isInterimCallBargeIn("我在深")).toBe(false);
+    expect(isInterimCallBargeIn("我在广州")).toBe(true); // same shape, not what it said
+  });
 });
 
 describe("interim barge-in countdown", () => {

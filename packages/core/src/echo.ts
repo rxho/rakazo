@@ -88,6 +88,10 @@ export function isEchoOfSpeech(
     matched += 1;
     cursor = at + 1;
   }
+  // Every token in order, however few: a short sliver of the reply itself —
+  // what the live recognizer sends as it transcribes the speaker's echo — is
+  // never a coincidence worth interrupting for.
+  if (matched === heardWords.length && matched >= 2) return true;
   if (matched < MIN_ECHO_WORDS) return false;
   return matched / heardWords.length >= threshold;
 }
