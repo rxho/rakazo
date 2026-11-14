@@ -510,6 +510,274 @@ function speakOneUtterance(Speech: typeof ExpoSpeech, text: string, voice?: stri
   });
 }
 
+// Streaming speech for a reply that is still being written: each utterance is
+// queued as its sentence completes, so the voice starts long before the text
+// settles, and the one-ahead rendering keeps playing through the gaps.
+
+export type StreamSpeechHandle = {
+  /** Queues one more completed utterance of the reply this session speaks. */
+  push: (utterance: string) => void;
+  /**
+   * No more input comes. Resolves once everything queued has played or the
+   * speech was cut; false only when no voice is set up or nothing was sayable.
+   */
+  finish: () => Promise<boolean>;
+  /** The outcome of the session so far, without closing it to more input. */
+  done: () => Promise<boolean>;
+};
+
+/** Queued utterances of one growing reply, handed to the speech driver in order. */
+class UtteranceQueue {
+  private items: string[] = [];
+  private closed = false;
+  private wake?: () => void;
+
+  push(item: string): void {
+    this.items.push(item);
+    this.wake?.();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.wake?.();
+  }
+
+  /** The next already-queued utterance, without waiting for more to arrive. */
+  shiftNow(): string | undefined {
+    return this.items.shift();
+  }
+
+  /** The next utterance, or undefined once closed with nothing left. */
+  take(): Promise<string | undefined> {
+    const ready = this.shiftNow();
+    if (ready !== undefined) return Promise.resolve(ready);
+    if (this.closed) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      this.wake = () => {
+        this.wake = undefined;
+        resolve(this.shiftNow());
+      };
+    });
+  }
+}
+
+/**
+ * Starts speaking a reply whose sentences arrive over time. The first utterance
+ * gates every request, so a stream that never gets text behaves like speech
+ * that never began.
+ */
+export function speakStream(opts: SpeechOptions = {}): StreamSpeechHandle {
+  const epoch = beginSpeech(opts.owner);
+  // Own the epoch before the first await, exactly like speakText: a stale
+  // owner's stop must not cut this stream once its first utterance lands.
+  activeSpeechOwner = opts.owner;
+  const queue = new UtteranceQueue();
+  let settle: ((spoken: boolean) => void) | undefined;
+  const outcome = new Promise<boolean>((resolve) => {
+    settle = resolve;
+  });
+  driveStream(epoch, opts, queue).then(
+    (spoken) => settle?.(spoken),
+    () => settle?.(false),
+  );
+  return {
+    push: (utterance) => {
+      if (utterance) queue.push(utterance);
+    },
+    finish: () => {
+      queue.close();
+      return outcome;
+    },
+    done: () => outcome,
+  };
+}
+
+async function driveStream(
+  epoch: number,
+  opts: SpeechOptions,
+  queue: UtteranceQueue,
+): Promise<boolean> {
+  const first = await queue.take();
+  if (first === undefined || !isCurrentSpeech(epoch)) return true;
+  let useDeviceVoice = false;
+  try {
+    useDeviceVoice = await loadDeviceVoiceEnabled();
+  } catch {
+    // A read failure must not be treated as "off": that would send reply text
+    // through hosted voice after the user opted for on-device only.
+    useDeviceVoice = true;
+  }
+  if (!isCurrentSpeech(epoch)) return true;
+  return useDeviceVoice
+    ? driveDeviceStream(epoch, opts, first, queue)
+    : driveHostedStream(epoch, opts, first, queue);
+}
+
+async function driveHostedStream(
+  epoch: number,
+  opts: SpeechOptions,
+  first: string,
+  queue: UtteranceQueue,
+): Promise<boolean> {
+  announcedSpeaker =
+    opts.botId && opts.speaker ? { botId: opts.botId, speaker: opts.speaker } : undefined;
+  // Stop has to work before a player exists. Pause stays hidden until one does.
+  const prepareControl: VoiceControl = {
+    pause() {},
+    resume() {},
+    stop() {
+      setPlayback(IDLE_PLAYBACK, null);
+    },
+  };
+  setPlayback(
+    { status: "playing", botId: opts.botId, messageId: opts.messageId, canPause: false },
+    prepareControl,
+  );
+  try {
+    const requestContext = opts.requestContext ?? (await captureApiRequestContext());
+    if (!isCurrentSpeech(epoch)) return true;
+    const prepared = await rpc(
+      "voice/prepare",
+      { text: first, voiceId: opts.voiceId, botId: opts.botId, scope: opts.scope },
+      { requestContext },
+    );
+    if (!isCurrentSpeech(epoch)) return true;
+    if (!prepared.ready) return false;
+
+    const generation = startHostedSpeechSession();
+    // The prepare control only owns the dock; stopping it would hide Stop.
+    if (activeControl !== prepareControl) activeControl?.stop();
+    if (!isCurrentSpeech(epoch)) return false;
+    const session = new HostedSession(generation);
+    const control: VoiceControl = {
+      pause: () => {
+        session.pause();
+        setPlayback(
+          { status: "paused", botId: opts.botId, messageId: opts.messageId, canPause: true },
+          control,
+        );
+      },
+      resume: () => {
+        session.resume();
+        setPlayback(
+          { status: "playing", botId: opts.botId, messageId: opts.messageId, canPause: true },
+          control,
+        );
+      },
+      stop: () => {
+        session.stop();
+        setPlayback(IDLE_PLAYBACK, null);
+      },
+    };
+    setPlayback(
+      { status: "playing", botId: opts.botId, messageId: opts.messageId, canPause: true },
+      control,
+    );
+    // Render one clip ahead; failures ride as values so an abandoned prefetch never
+    // rejects unhandled.
+    type Rendered = { audio: Uint8Array; error?: never } | { audio?: never; error: unknown };
+    const render = (text: string): Promise<Rendered> =>
+      renderUtterance(text, opts, requestContext).then(
+        (audio) => ({ audio }),
+        (error: unknown) => ({ error }),
+      );
+    let finished = false;
+    try {
+      let line: string | undefined = first;
+      let next: Promise<Rendered> | null = null;
+      while (line !== undefined) {
+        if (session.isStopped || !isCurrentSpeech(epoch)) break;
+        const rendering = next ?? render(line);
+        // Only render ahead when the next line is already queued; the last
+        // sentence has nothing to overlap with, and waiting would add latency.
+        const ahead = queue.shiftNow();
+        next = ahead !== undefined ? render(ahead) : null;
+        const rendered = await rendering;
+        if ("error" in rendered) throw rendered.error;
+        if (session.isStopped || !isCurrentSpeech(epoch)) break;
+        await playSpeechClip(rendered.audio, session);
+        line = ahead ?? (await queue.take());
+      }
+      finished = !session.isStopped && isCurrentSpeech(epoch);
+      return true;
+    } finally {
+      releasePlayback(epoch, isCurrentHostedSpeechSession(generation), finished);
+    }
+  } finally {
+    // A thrown or abandoned prepare must not leave the dock up. A newer Play
+    // has already replaced this control.
+    if (isCurrentSpeech(epoch) && activeControl === prepareControl) {
+      setPlayback(IDLE_PLAYBACK, null);
+    }
+  }
+}
+
+async function driveDeviceStream(
+  epoch: number,
+  opts: SpeechOptions,
+  first: string,
+  queue: UtteranceQueue,
+): Promise<boolean> {
+  // Claim the session before importing so a newer call cannot start during
+  // that await and then overlap this call's remaining chunks.
+  const session = startDeviceSpeechSession();
+  const Speech = await loadExpoSpeech();
+  // Each bot keeps its own offline voice; without one the engine's default speaks.
+  const voice = opts.botId ? await voiceForBot(opts.botId).catch(() => undefined) : undefined;
+  if (!isCurrentDeviceSpeechSession(session) || !isCurrentSpeech(epoch)) return true;
+  await Speech.stop();
+  if (!isCurrentDeviceSpeechSession(session) || !isCurrentSpeech(epoch)) return true;
+
+  const pausable = Speech as unknown as {
+    pause?: () => void | Promise<void>;
+    resume?: () => void | Promise<void>;
+  };
+  const canPause =
+    Platform.OS === "ios" &&
+    typeof pausable.pause === "function" &&
+    typeof pausable.resume === "function";
+  const control: VoiceControl = {
+    pause: () => {
+      if (!canPause) return;
+      void pausable.pause?.();
+      setPlayback(
+        { status: "paused", botId: opts.botId, messageId: opts.messageId, canPause },
+        control,
+      );
+    },
+    resume: () => {
+      if (!canPause) return;
+      void pausable.resume?.();
+      setPlayback(
+        { status: "playing", botId: opts.botId, messageId: opts.messageId, canPause },
+        control,
+      );
+    },
+    stop: () => {
+      deviceSpeechSession += 1;
+      void Speech.stop();
+      setPlayback(IDLE_PLAYBACK, null);
+    },
+  };
+  setPlayback(
+    { status: "playing", botId: opts.botId, messageId: opts.messageId, canPause },
+    control,
+  );
+  let finished = false;
+  try {
+    let line: string | undefined = first;
+    while (line !== undefined) {
+      if (!isCurrentDeviceSpeechSession(session) || !isCurrentSpeech(epoch)) return true;
+      await speakOneUtterance(Speech, line, voice);
+      line = await queue.take();
+    }
+    finished = isCurrentDeviceSpeechSession(session) && isCurrentSpeech(epoch);
+    return true;
+  } finally {
+    releasePlayback(epoch, isCurrentDeviceSpeechSession(session), finished);
+  }
+}
+
 export async function speakUtterance(
   text: string,
   opts: SpeechOptions & { requestContext?: ApiRequestContext } = {},

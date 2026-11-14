@@ -250,6 +250,7 @@ export function useThreadVoiceCall({
         botColor: mentionBots.find((bot) => bot.id === targetBotId)?.color,
         botAvatarSet: mentionBots.find((bot) => bot.id === targetBotId)?.avatarSet,
         transcribe: plan.transcribe,
+        streamAsr: plan.kind === "provider" && plan.streamAsr,
         greeting: greet ? callGreeting(botName, callerName, switchedHere) : undefined,
         session: setupSession,
         requestContext,

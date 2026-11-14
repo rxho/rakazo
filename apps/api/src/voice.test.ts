@@ -35,6 +35,7 @@ describe("toVoiceStatus", () => {
       configured: true,
       ready: false,
       transcribe: true,
+      streamAsr: false,
       provider: "elevenlabs",
       voiceId: "",
     });
@@ -50,6 +51,7 @@ describe("toVoiceStatus", () => {
       configured: false,
       ready: false,
       transcribe: false,
+      streamAsr: false,
       provider: null,
       voiceId: "",
     });
@@ -950,6 +952,7 @@ describe("voiceCredentialServer", () => {
       endpoint: "http://100.64.0.10:8810/v1",
       ttsModel: "kokoro",
       sttModel: adapters.DEFAULT_COMPATIBLE_STT_MODEL,
+      asrStreamUrl: "",
     });
     const output = toVoiceCredential({
       id: "cred-1",

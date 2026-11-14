@@ -47,6 +47,7 @@ import { firstModelConnectAnalytics } from "../model-connect-analytics.js";
 import type { RouterDeps } from "../router.js";
 import {
   accountVoiceCatalog,
+  defaultVoiceAsrStreamUrl,
   disconnectVoiceCredential,
   loadDefaultVoiceCredential,
   loadVoiceCredential,
@@ -472,7 +473,10 @@ export function accountRoutes(ctx: RouterContext) {
       ),
       status: authed.voice.status.handler(async ({ context, input }) => {
         const cred = await findDefaultVoiceCredential(deps.prisma, context.actor, input?.scope);
-        return toVoiceStatus(cred);
+        const streamAsr = cred
+          ? Boolean(await defaultVoiceAsrStreamUrl(deps, context.actor, input?.scope))
+          : false;
+        return toVoiceStatus(cred, streamAsr);
       }),
       credentials: authed.voice.credentials.handler(async ({ context, input }) => {
         const target = await voicePreferenceTarget(deps.prisma, context.actor, input?.scope);
@@ -506,6 +510,7 @@ export function accountRoutes(ctx: RouterContext) {
           baseUrl: input.baseUrl,
           ttsModel: input.ttsModel,
           sttModel: input.sttModel,
+          asrStreamUrl: input.asrStreamUrl,
           scope: input.scope,
           signal: context.signal,
         }),

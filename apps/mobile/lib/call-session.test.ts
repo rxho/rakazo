@@ -152,10 +152,14 @@ function idleThread(botId: string): MobileSnapshot {
   return { threadId: "thread-1", botId, cursor: 0, olderCursor: null, run: null, messages: [] };
 }
 
-function fakes(opts: { onDevice?: boolean; loadThread?: boolean } = {}) {
+function fakes(opts: { onDevice?: boolean; loadThread?: boolean; speakStream?: boolean } = {}) {
   const recordings: Array<Deferred<CallClip | null>> = [];
   const signals: AbortSignal[] = [];
   const speeches: Array<Deferred<void>> = [];
+  const streamed: string[] = [];
+  const streamOutcomes: Array<Deferred<boolean>> = [];
+  let streamClosed = 0;
+  let streamText: ((messageId: string, text: string, runId?: string) => void) | undefined;
   const send = vi.fn(
     async (_botId: string, _text: string, _clientNonce: string): Promise<string | undefined> =>
       "run-1",
@@ -216,10 +220,27 @@ function fakes(opts: { onDevice?: boolean; loadThread?: boolean } = {}) {
       speeches.push(next);
       return next.promise;
     },
-    watch: (botId, onReply, onCallEnded, onThread) => {
+    ...(opts.speakStream
+      ? {
+          speakStream: vi.fn(() => {
+            const outcome = deferred<boolean>();
+            streamOutcomes.push(outcome);
+            return {
+              push: (utterance: string) => streamed.push(utterance),
+              finish: () => {
+                streamClosed += 1;
+                return outcome.promise;
+              },
+              done: () => outcome.promise,
+            };
+          }),
+        }
+      : {}),
+    watch: (botId, onReply, onCallEnded, onThread, onStreamText) => {
       reply = onReply;
       ended = onCallEnded;
       threadUpdate = onThread;
+      streamText = onStreamText;
       // The real watcher hands over the loaded thread first; the microphone waits for it.
       if (opts.loadThread !== false) onThread(idleThread(botId));
       return unwatch;
@@ -245,6 +266,11 @@ function fakes(opts: { onDevice?: boolean; loadThread?: boolean } = {}) {
     thread: (thread: MobileSnapshot) => threadUpdate(thread),
     say: (text: string) =>
       recordings[recordings.length - 1]?.resolve({ base64: text, mimeType: "audio/m4a" }),
+    streamWith: (messageId: string, text: string, runId?: string) =>
+      streamText?.(messageId, text, runId),
+    streamed,
+    streamOutcomes,
+    streamClosed: () => streamClosed,
     replyWith: (messageId: string, text: string, runId?: string) => reply(messageId, text, runId),
     endedCall: (callId: string | undefined, farewell?: string) => ended({ callId, farewell }),
   };
@@ -2420,5 +2446,77 @@ describe("mobile call on a session change", () => {
       ["threads/send", "space-a"],
       ["threads/endCall", "space-a"],
     ]);
+  });
+});
+
+describe("streamed call replies", () => {
+  it("speaks sentences of a growing reply and finishes with the settled text", async () => {
+    const fake = fakes({ onDevice: true, speakStream: true });
+    startCall({ botId: "bot-1", botName: "Ada" }, fake.deps);
+    await flush();
+
+    fake.hear("check the deploy");
+    await flush();
+    expect(getSnapshot()?.phase).toBe("thinking");
+
+    fake.streamWith("m-1", "The deploy is green. Two files");
+    await flush();
+    expect(fake.streamed).toEqual(["The deploy is green."]);
+    expect(getSnapshot()?.phase).toBe("speaking");
+    // The ordinary whole-reply speak path stayed unused.
+    expect(fake.spoken).toEqual([]);
+
+    fake.streamWith("m-1", "The deploy is green. Two files changed. Done soon.");
+    await flush();
+    expect(fake.streamed).toEqual(["The deploy is green.", "Two files changed."]);
+
+    fake.replyWith("m-1", "The deploy is green. Two files changed. Done soon.", "run-1");
+    await flush();
+    expect(fake.streamed).toEqual(["The deploy is green.", "Two files changed.", "Done soon."]);
+    expect(fake.streamClosed()).toBe(1);
+    expect(getSnapshot()?.exchanges.at(-1)).toEqual({
+      role: "bot",
+      text: "The deploy is green. Two files changed. Done soon.",
+    });
+
+    fake.streamOutcomes[0]?.resolve(true);
+    await flush();
+    expect(getSnapshot()?.phase).toBe("listening");
+  });
+
+  it("ignores growing text of a reply outside this call's run", async () => {
+    const fake = fakes({ onDevice: true, speakStream: true });
+    startCall({ botId: "bot-1", botName: "Ada" }, fake.deps);
+    await flush();
+
+    fake.hear("check the deploy");
+    await flush();
+    fake.streamWith("m-9", "Another run's reply.", "run-2");
+    await flush();
+
+    expect(fake.streamed).toEqual([]);
+    expect(getSnapshot()?.phase).toBe("thinking");
+  });
+
+  it("steers the working run when the caller talks over the waiting sound", async () => {
+    const fake = fakes({ onDevice: true });
+    startCall({ botId: "bot-1", botName: "Ada" }, fake.deps);
+    await flush();
+
+    fake.hear("check the deploy");
+    await flush();
+    // The send was accepted, so the microphone reopened over the waiting sound.
+    expect(fake.signals.length).toBe(2);
+
+    fake.thread({
+      ...idleThread("bot-1"),
+      run: { id: "run-1", status: "running" },
+      messages: [],
+    });
+    fake.hear("also run the tests");
+    await flush();
+
+    expect(fake.followUp).toHaveBeenCalledWith("bot-1", "also run the tests", expect.any(String));
+    expect(fake.send).toHaveBeenCalledOnce();
   });
 });

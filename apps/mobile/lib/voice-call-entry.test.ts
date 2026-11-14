@@ -50,6 +50,7 @@ describe("mobile voice call entry", () => {
     await expect(resolveVoiceCallPlan(fakes)).resolves.toEqual({
       kind: "provider",
       transcribe: true,
+      streamAsr: false,
     });
     expect(fakes.dictationAvailable).not.toHaveBeenCalled();
   });
@@ -75,6 +76,7 @@ describe("mobile voice call entry", () => {
     await expect(resolveVoiceCallPlan(fakes)).resolves.toEqual({
       kind: "provider",
       transcribe: true,
+      streamAsr: false,
     });
   });
 
@@ -88,6 +90,7 @@ describe("mobile voice call entry", () => {
     await expect(resolveVoiceCallPlan(fakes)).resolves.toEqual({
       kind: "provider",
       transcribe: false,
+      streamAsr: false,
     });
     expect(fakes.dictationAvailable).toHaveBeenCalledOnce();
   });

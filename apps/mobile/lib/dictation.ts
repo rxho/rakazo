@@ -94,6 +94,147 @@ async function load(): Promise<SpeechRecognizer> {
   return ExpoSpeechRecognitionModule as unknown as SpeechRecognizer;
 }
 
+// The server's own streaming recognizer: live audio relays to it over the call's
+// WebSocket, so dictation works wherever the system recognizer cannot.
+
+/** Where the streaming recognizer listens, with the headers that signed-in requests carry. */
+export type ServerAsrTarget = { url: string; headers: Record<string, string> };
+
+/** The slice of the native module this file needs, so tests can drive the events. */
+type StreamAsrModule = {
+  isAvailable(): boolean;
+  start(url: string, headers: Record<string, string>, lang: string): Promise<boolean>;
+  stop(): void;
+  abort(): void;
+  addListener(
+    event: "onResult",
+    listener: (payload: { text: string; final: boolean }) => void,
+  ): { remove: () => void };
+  addListener(
+    event: "onError",
+    listener: (payload: { message: string }) => void,
+  ): {
+    remove: () => void;
+  };
+  addListener(event: "onEnd", listener: () => void): { remove: () => void };
+};
+
+let serverTarget: ServerAsrTarget | null = null;
+
+/** Points dictation at the server's streaming recognizer, or back at the device's own. */
+export function setServerAsr(target: ServerAsrTarget | null): void {
+  serverTarget = target;
+}
+
+let streamAsrLoader: Promise<StreamAsrModule | null> | null = null;
+let injectedStreamAsr: StreamAsrModule | null | undefined;
+
+/** Test seam: an injected module replaces the native one; null means none. */
+export function setStreamAsrModule(module: StreamAsrModule | null): void {
+  injectedStreamAsr = module;
+  streamAsrLoader = null;
+}
+
+function loadStreamAsr(): Promise<StreamAsrModule | null> {
+  if (injectedStreamAsr !== undefined) return Promise.resolve(injectedStreamAsr);
+  streamAsrLoader ??= (async () => {
+    if (Platform.OS !== "android") return null;
+    try {
+      const { requireNativeModule } = await import("expo-modules-core");
+      const native = requireNativeModule<StreamAsrModule>("RakazoStreamAsr");
+      return native && typeof native.start === "function" ? native : null;
+    } catch {
+      return null;
+    }
+  })();
+  return streamAsrLoader;
+}
+
+/**
+ * The server recognizer as the `SpeechRecognizer` shape the session logic drives.
+ * Its transcripts are whole-so-far revisions, so each one is trimmed by the words
+ * an earlier final already banked, and only the new tail is reported.
+ */
+function serverRecognizer(target: ServerAsrTarget, native: StreamAsrModule): SpeechRecognizer {
+  const resultListeners = new Set<(event: ResultEvent) => void>();
+  const endListeners = new Set<() => void>();
+  const errorListeners = new Set<(event: ErrorEvent) => void>();
+  let banked = "";
+  const emitResult = (text: string, isFinal: boolean) => {
+    for (const listener of resultListeners) listener({ isFinal, results: [{ transcript: text }] });
+  };
+  const subs = [
+    native.addListener("onResult", ({ text, final }) => {
+      const trimmed = text.startsWith(banked) ? text.slice(banked.length).trim() : text.trim();
+      if (!trimmed) return;
+      if (final) {
+        banked = `${banked} ${text}`.replace(/\s+/g, " ").trim();
+        emitResult(trimmed, true);
+        return;
+      }
+      emitResult(trimmed, false);
+    }),
+    native.addListener("onError", () =>
+      errorListeners.forEach((listener) => listener({ error: "network" })),
+    ),
+    native.addListener("onEnd", () => endListeners.forEach((listener) => listener())),
+  ];
+  return {
+    start(options) {
+      banked = "";
+      // A slow or refused connection surfaces as its error event, like the OS engines.
+      void native.start(target.url, target.headers, options.lang).then(
+        (opened) => {
+          if (!opened)
+            errorListeners.forEach((listener) => listener({ error: "service-not-allowed" }));
+        },
+        () => errorListeners.forEach((listener) => listener({ error: "network" })),
+      );
+    },
+    stop() {
+      native.stop();
+    },
+    abort() {
+      native.abort();
+      // This recognizer lives for one session; its bridge to the module ends with it.
+      for (const sub of subs) sub.remove();
+    },
+    isRecognitionAvailable() {
+      return native.isAvailable();
+    },
+    async requestPermissionsAsync() {
+      return { granted: native.isAvailable() };
+    },
+    getSupportedLocales() {
+      return Promise.resolve({ locales: [] });
+    },
+    addListener(event, listener) {
+      if (event === "result") resultListeners.add(listener as (event: ResultEvent) => void);
+      else if (event === "end") endListeners.add(listener as () => void);
+      else errorListeners.add(listener as (event: ErrorEvent) => void);
+      return {
+        remove: () => {
+          resultListeners.delete(listener as (event: ResultEvent) => void);
+          endListeners.delete(listener as () => void);
+          errorListeners.delete(listener as (event: ErrorEvent) => void);
+        },
+      };
+    },
+    // Not reached on Android; kept for the interface.
+    getAudioSessionCategoryAndOptionsIOS() {
+      return { category: "", categoryOptions: [], mode: "" };
+    },
+  } satisfies SpeechRecognizer;
+}
+
+/** The recognizer a dictation session should use, when the server offers streaming. */
+async function loadServer(target: ServerAsrTarget | null): Promise<SpeechRecognizer | null> {
+  if (!target) return null;
+  const native = await loadStreamAsr();
+  if (!native || !native.isAvailable()) return null;
+  return serverRecognizer(target, native);
+}
+
 let supported: Promise<string[]> | null = null;
 
 /**
@@ -116,7 +257,7 @@ let active: Session | null = null;
 /** True when the device can recognise speech itself and the caller allowed it. */
 export async function available(): Promise<boolean> {
   try {
-    const recognizer = await load();
+    const recognizer = (await loadServer(serverTarget)) ?? (await load());
     if (!recognizer.isRecognitionAvailable()) return false;
     return (await recognizer.requestPermissionsAsync()).granted;
   } catch {
@@ -163,7 +304,9 @@ export async function listen(opts: {
   if (opts.signal?.aborted) return;
   stop();
   const mine = token;
-  const recognizer = await load();
+  // The server's streaming recognizer comes first; the device's own engine answers
+  // wherever the server offers none.
+  const recognizer = (await loadServer(serverTarget)) ?? (await load());
   const lang = supportedSpeechTag(opts.lang || "en-US", await supportedLocales(recognizer));
   // A hang-up or a newer session landed while the native module was loading.
   if (token !== mine) return;

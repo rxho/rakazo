@@ -302,6 +302,7 @@ export async function respondToMobileCall(call: IncomingBotCall, action: "answer
         botColor: call.color,
         botAvatarSet: call.avatarSet,
         transcribe: voice.transcribe,
+        streamAsr: voice.streamAsr ?? false,
         greeting: result.opening,
         answered: { callId: target.callId },
         session: generation,

@@ -78,6 +78,7 @@ export function VoiceSettingsOverlay({
   const baseUrlId = useId();
   const ttsModelId = useId();
   const sttModelId = useId();
+  const asrStreamUrlId = useId();
   const providerSelectId = useId();
   const [catalog, setCatalog] = useState<VoiceCatalogEntry[]>(cached?.catalog ?? []);
   const [credentials, setCredentials] = useState<VoiceCredential[]>(cached?.credentials ?? []);
@@ -101,9 +102,10 @@ export function VoiceSettingsOverlay({
   const [baseUrl, setBaseUrl] = useState(cached?.credential?.endpoint ?? "");
   const [ttsModel, setTtsModel] = useState(cached?.credential?.ttsModel ?? "");
   const [sttModel, setSttModel] = useState(cached?.credential?.sttModel ?? "");
+  const [asrStreamUrl, setAsrStreamUrl] = useState(cached?.credential?.asrStreamUrl ?? "");
   // The connection fields as last rendered, read when a connect finishes.
-  const connection = useRef({ speechModel, baseUrl, ttsModel, sttModel });
-  connection.current = { speechModel, baseUrl, ttsModel, sttModel };
+  const connection = useRef({ speechModel, baseUrl, ttsModel, sttModel, asrStreamUrl });
+  connection.current = { speechModel, baseUrl, ttsModel, sttModel, asrStreamUrl };
   const speechModelSave = useRef<string | null>(null);
   const voicesRequest = useRef(0);
   const [loading, setLoading] = useState(!cached);
@@ -147,6 +149,7 @@ export function VoiceSettingsOverlay({
     if (!keep("baseUrl")) setBaseUrl(cred?.endpoint ?? "");
     if (!keep("ttsModel")) setTtsModel(cred?.ttsModel ?? "");
     if (!keep("sttModel")) setSttModel(cred?.sttModel ?? "");
+    if (!keep("asrStreamUrl")) setAsrStreamUrl(cred?.asrStreamUrl ?? "");
     if (!cred) return Promise.resolve();
     return queryClient
       .fetchQuery(
@@ -263,6 +266,8 @@ export function VoiceSettingsOverlay({
                 baseUrl: baseUrl.trim(),
                 ttsModel: ttsModel.trim() || undefined,
                 sttModel: sttModel.trim() || undefined,
+                // Always sent: a blank clears the address, and the server keeps one it had.
+                asrStreamUrl: asrStreamUrl.trim(),
               }
             : {}),
         });
@@ -525,6 +530,23 @@ export function VoiceSettingsOverlay({
                       placeholder={DEFAULT_COMPATIBLE_STT_MODEL}
                     />
                   </Field>
+                  <Field className="mt-5">
+                    <FieldLabel htmlFor={asrStreamUrlId}>
+                      <Trans>Streaming recognition address</Trans>
+                    </FieldLabel>
+                    <Input
+                      id={asrStreamUrlId}
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={asrStreamUrl}
+                      maxLength={2048}
+                      onChange={(event) => {
+                        edited.current.add("asrStreamUrl");
+                        setAsrStreamUrl(event.target.value);
+                      }}
+                      placeholder="ws://192.168.1.20:10095"
+                    />
+                  </Field>
                 </>
               ) : null}
               {(keyless && credential) || linked ? null : (
@@ -716,6 +738,12 @@ function selectedProvider(
 
 const NO_VOICES: VoiceInfo[] = [];
 
-const CONNECTION_FIELDS = ["speechModel", "baseUrl", "ttsModel", "sttModel"] as const;
+const CONNECTION_FIELDS = [
+  "speechModel",
+  "baseUrl",
+  "ttsModel",
+  "sttModel",
+  "asrStreamUrl",
+] as const;
 
 type EditableField = "voiceId" | (typeof CONNECTION_FIELDS)[number];

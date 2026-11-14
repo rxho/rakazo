@@ -1,6 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createUtteranceStream,
   narrateTool,
   speakable,
   speechFromBlocks,
@@ -132,6 +133,21 @@ describe("toUtterances", () => {
     const out = toUtterances("Yes. The whole suite is green and nothing else changed.");
     expect(out).toHaveLength(1);
     expect(out[0]).toContain("Yes.");
+  });
+
+  it("splits CJK sentences that carry no space after their ender", () => {
+    const out = toUtterances("测试通过了。我改了两个文件。要推上去吗？");
+    expect(out).toHaveLength(3);
+    expect(out[0]).toContain("测试通过了。");
+    expect(out[2]).toContain("要推上去吗？");
+  });
+
+  it("breaks a runaway CJK sentence at a full-width clause", () => {
+    const long = `我看了${Array.from({ length: 60 }, (_, i) => `项目${i}`).join("，")}然后完成了。`;
+    const out = toUtterances(long, { maxChars: 120 });
+    expect(out.length).toBeGreaterThan(1);
+    for (const piece of out) expect(piece.length).toBeLessThanOrEqual(120);
+    expect(out.join(" ")).toContain("项目59");
   });
 
   it("breaks a runaway sentence at a clause, never mid-word", () => {
@@ -353,5 +369,43 @@ describe("spokenDecision", () => {
     expect(spokenDecision("sino revisa el deploy")).toBeNull();
     expect(spokenDecision("¿Sí? ¿Cuáles?")).toBeNull();
     expect(spokenDecision("dale los permisos de admin")).toBeNull();
+  });
+});
+
+describe("createUtteranceStream", () => {
+  it("releases a sentence once later text proves it complete", () => {
+    const stream = createUtteranceStream();
+    expect(stream.push("The tests pass")).toEqual([]);
+    expect(stream.push("The tests pass now.")).toEqual([]);
+    expect(stream.push("The tests pass now. I changed")).toEqual(["The tests pass now."]);
+    // The second sentence only just ended; with nothing after it, it may still grow.
+    expect(stream.push("The tests pass now. I changed two files.")).toEqual([]);
+    expect(stream.finish("The tests pass now. I changed two files. Push it?")).toEqual([
+      "I changed two files.",
+      "Push it?",
+    ]);
+  });
+
+  it("releases CJK sentences as they complete", () => {
+    const stream = createUtteranceStream();
+    expect(stream.push("测试通过了。我改了")).toEqual(["测试通过了。"]);
+    expect(stream.finish("测试通过了。我改了两个文件。")).toEqual(["我改了两个文件。"]);
+  });
+
+  it("holds a revision behind what was already released, then speaks the tail", () => {
+    const stream = createUtteranceStream();
+    expect(stream.push("First sentence. Second")).toEqual(["First sentence."]);
+    // The second sentence was rewritten while still growing: nothing mid-stream.
+    expect(stream.push("First sentence. A different second")).toEqual([]);
+    expect(stream.finish("First sentence. A different second one entirely.")).toEqual([
+      "A different second one entirely.",
+    ]);
+  });
+
+  it("finishes with the sentences it held back while they could still grow", () => {
+    const stream = createUtteranceStream();
+    expect(stream.push("One. Two.")).toEqual(["One."]);
+    expect(stream.finish("One. Two. Three.")).toEqual(["Two.", "Three."]);
+    expect(stream.finish("One. Two. Three.")).toEqual([]);
   });
 });

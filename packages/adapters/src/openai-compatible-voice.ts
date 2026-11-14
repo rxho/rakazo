@@ -56,6 +56,27 @@ export interface OpenAiCompatibleVoiceSecret {
   apiKey?: string;
   ttsModel: string;
   sttModel: string;
+  /** Streaming-recognition WebSocket beside the speech server; optional. */
+  asrStreamUrl?: string;
+}
+
+/** A ws(s) address for streaming recognition; empty means none. Private hosts allowed. */
+export function selfHostedAsrStreamUrl(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return "";
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error("The streaming recognition address must be an absolute ws(s) URL.");
+  }
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error("The streaming recognition address must use ws or wss.");
+  }
+  if (url.username || url.password) {
+    throw new Error("The streaming recognition address must not contain credentials.");
+  }
+  return url.toString();
 }
 
 function modelIdOrDefault(value: string | undefined, fallback: string, label: string): string {
@@ -79,6 +100,7 @@ export function serializeOpenAiCompatibleVoiceSecret(
     apiKey?: string;
     ttsModel?: string;
     sttModel?: string;
+    asrStreamUrl?: string;
   },
   previousPlaintext?: string,
   policy?: { allowPrivate?: boolean },
@@ -92,6 +114,11 @@ export function serializeOpenAiCompatibleVoiceSecret(
     throw new Error("That API key has characters a key cannot contain.");
   }
   assertHttpsForKeyedOpenAiCompatibleUrl(url, apiKey);
+  // The form always sends the field: a blank clears it, an absent one keeps the saved address.
+  const asrStreamUrl =
+    input.asrStreamUrl !== undefined
+      ? selfHostedAsrStreamUrl(input.asrStreamUrl)
+      : (same?.asrStreamUrl ?? "");
   const secret: OpenAiCompatibleVoiceSecret = {
     kind: "openai_compatible",
     baseUrl,
@@ -106,6 +133,7 @@ export function serializeOpenAiCompatibleVoiceSecret(
       DEFAULT_COMPATIBLE_STT_MODEL,
       "Transcription",
     ),
+    ...(asrStreamUrl ? { asrStreamUrl } : {}),
   };
   return JSON.stringify(secret);
 }
@@ -135,6 +163,9 @@ export function parseOpenAiCompatibleVoiceSecret(plaintext: string): OpenAiCompa
     ...(typeof record.apiKey === "string" && record.apiKey ? { apiKey: record.apiKey } : {}),
     ttsModel: typeof record.ttsModel === "string" ? record.ttsModel : DEFAULT_COMPATIBLE_TTS_MODEL,
     sttModel: typeof record.sttModel === "string" ? record.sttModel : DEFAULT_COMPATIBLE_STT_MODEL,
+    ...(typeof record.asrStreamUrl === "string" && record.asrStreamUrl
+      ? { asrStreamUrl: record.asrStreamUrl }
+      : {}),
   };
 }
 
@@ -143,6 +174,7 @@ export interface OpenAiCompatibleVoiceServer {
   endpoint: string;
   ttsModel: string;
   sttModel: string;
+  asrStreamUrl: string;
 }
 
 /** Undefined when the saved secret is unreadable. Never includes the key. */
@@ -156,6 +188,7 @@ export function openAiCompatibleVoiceServer(
       endpoint: normalizeOpenAiCompatibleBaseUrl(secret.baseUrl),
       ttsModel: secret.ttsModel,
       sttModel: secret.sttModel,
+      asrStreamUrl: secret.asrStreamUrl ?? "",
     };
   } catch {
     return undefined;

@@ -1357,6 +1357,8 @@ export const VoiceCredentialSchema = z.object({
   endpoint: z.string().default(""),
   ttsModel: z.string().default(""),
   sttModel: z.string().default(""),
+  /** Self-hosted streaming-recognition address (ws(s)). Empty when the server has none. */
+  asrStreamUrl: z.string().default(""),
 });
 export type VoiceCredential = z.infer<typeof VoiceCredentialSchema>;
 
@@ -1364,6 +1366,8 @@ export const VoiceStatusSchema = z.object({
   configured: z.boolean(),
   ready: z.boolean(),
   transcribe: z.boolean(),
+  /** A streaming recognizer answers live audio, so calls dictate through it. */
+  streamAsr: z.boolean().default(false),
   provider: z.string().nullable(),
   voiceId: z.string(),
 });
