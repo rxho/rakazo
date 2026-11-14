@@ -102,9 +102,11 @@ export const funAsrStreamAsr: StreamAsrOpener = async (address, signal) => {
     finish(null);
     throw error instanceof Error ? error : new Error(String(error));
   });
-  const id = randomId();
   const begin = () => {
     if (closed) return;
+    // A fresh name per utterance, so one connection can carry a whole call's
+    // utterances and the server resets its state between them.
+    const id = randomId();
     socket.send(
       JSON.stringify({
         mode: "2pass",

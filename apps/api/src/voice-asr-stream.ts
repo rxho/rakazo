@@ -15,6 +15,13 @@ export { VOICE_ASR_CONNECT_PATH };
 const MAX_FRAME_BYTES = 32 * 1024;
 /** A recognizer connection nothing flows through ends, so none outlives its call. */
 const IDLE_TIMEOUT_MS = 120_000;
+/**
+ * Audio the caller is streaming that draws no transcript for this long means the
+ * recognizer accepted the connection but stopped decoding: a quiet caller hears
+ * nothing back either way, so the caller is told and can reconnect, while a
+ * speaking one is spared a microphone wired to a silent server.
+ */
+const STALL_TIMEOUT_MS = 15_000;
 /** Recognizer connections one user may hold at once; a call needs one. */
 const MAX_CONNECTIONS_PER_USER = 2;
 
@@ -82,12 +89,23 @@ export function createVoiceAsrUpgradeHandler(deps: VoiceAsrRelayDeps) {
     let session: StreamAsrSession | null = null;
     let controller: AbortController | null = null;
     let idle: ReturnType<typeof setTimeout> | undefined;
+    let stall: ReturnType<typeof setTimeout> | undefined;
     const touched = () => {
       clearTimeout(idle);
       idle = setTimeout(() => close(1000, "Idle"), IDLE_TIMEOUT_MS);
     };
+    /** One chunk reached the recognizer; a transcript is the only thing that disarms this. */
+    const streaming = () => {
+      touched();
+      clearTimeout(stall);
+      stall = setTimeout(() => {
+        send(ws, { type: "error", message: "The recognizer stopped responding." });
+        close(1011, "Recognizer stalled");
+      }, STALL_TIMEOUT_MS);
+    };
     const close = (code: number, reason: string) => {
       clearTimeout(idle);
+      clearTimeout(stall);
       controller?.abort();
       session?.close();
       session = null;
@@ -130,6 +148,7 @@ export function createVoiceAsrUpgradeHandler(deps: VoiceAsrRelayDeps) {
       try {
         for await (const result of live.results) {
           touched();
+          clearTimeout(stall);
           send(ws, { type: "result", text: result.text, final: result.final });
         }
       } catch {
@@ -141,6 +160,7 @@ export function createVoiceAsrUpgradeHandler(deps: VoiceAsrRelayDeps) {
     ws.on("message", (data, isBinary) => {
       touched();
       if (isBinary) {
+        if (session) streaming();
         session?.audio(data as Buffer);
         return;
       }

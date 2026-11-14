@@ -147,8 +147,26 @@ let onCall = false;
 let dictating = false;
 let audioModeChange: Promise<void> = Promise.resolve();
 
+/**
+ * One stuck native audio call must not wedge every later one: they all queue on
+ * this one chain, and a wedged link would silence the app — calls with neither a
+ * greeting nor a microphone — until restart. A change that outlives this budget
+ * fails its caller and the chain moves on.
+ */
+const AUDIO_MODE_TIMEOUT_MS = 8_000;
+
 function changeAudioMode(change: () => Promise<void>): Promise<void> {
-  const next = audioModeChange.then(change);
+  const next = audioModeChange.then(() =>
+    Promise.race([
+      change(),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("The audio system did not answer in time.")),
+          AUDIO_MODE_TIMEOUT_MS,
+        ),
+      ),
+    ]),
+  );
   audioModeChange = next.catch(() => undefined);
   return next;
 }
@@ -912,6 +930,13 @@ export function speechClipType(bytes: Uint8Array): { mimeType: string; extension
     : { mimeType: "audio/mpeg", extension: "mp3" };
 }
 
+/**
+ * A paused clip is normally resumed or stopped within a turn, but a pause
+ * nothing ever returns to must still end: its promise gates the utterance queue
+ * and the microphone behind it, and its player is only released once it settles.
+ */
+const PAUSE_ABANDON_MS = 120_000;
+
 export async function playSpeechClip(bytes: Uint8Array, session?: HostedSession): Promise<void> {
   const AudioCtor = (globalThis as { Audio?: typeof Audio }).Audio;
   if (typeof AudioCtor === "function") {
@@ -933,9 +958,11 @@ async function playWithHtmlAudio(
     const audio = new AudioCtor(url);
     await new Promise<void>((resolve, reject) => {
       let settled = false;
+      let abandoned: ReturnType<typeof setTimeout> | undefined;
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
+        clearTimeout(abandoned);
         audio.onended = null;
         audio.onerror = null;
         session?.setPlayer(null);
@@ -945,8 +972,16 @@ async function playWithHtmlAudio(
       audio.onended = () => finish();
       audio.onerror = () => finish(new Error(t`Could not play that clip.`));
       session?.setPlayer({
-        pause: () => audio.pause(),
-        resume: () => void audio.play().catch(() => undefined),
+        pause: () => {
+          audio.pause();
+          // A pause nothing ever returns to must still end, like the native path.
+          clearTimeout(abandoned);
+          abandoned = setTimeout(() => finish(), PAUSE_ABANDON_MS);
+        },
+        resume: () => {
+          clearTimeout(abandoned);
+          void audio.play().catch(() => undefined);
+        },
         stopNow: () => {
           audio.pause();
           finish();
@@ -956,7 +991,10 @@ async function playWithHtmlAudio(
         finish();
         return;
       }
-      if (session?.isPaused) return;
+      if (session?.isPaused) {
+        abandoned = setTimeout(() => finish(), PAUSE_ABANDON_MS);
+        return;
+      }
       try {
         void audio
           .play()
@@ -1025,14 +1063,14 @@ async function playWithNativeAudio(bytes: Uint8Array, session?: HostedSession): 
       session?.setPlayer({
         pause: () => {
           player.pause();
-          // A long pause is not a stalled start. Leaving this timer armed
-          // rejects the clip and drops Resume.
+          // A long pause is not a stalled start, but an abandoned one must still end.
           clearTimeout(timer);
-          timer = undefined;
+          timer = setTimeout(() => finish(), PAUSE_ABANDON_MS);
         },
         resume: () => {
           player.play();
-          if (!timer) armStartupWatchdog();
+          clearTimeout(timer);
+          armStartupWatchdog();
         },
         stopNow: () => {
           player.pause();
@@ -1043,7 +1081,10 @@ async function playWithNativeAudio(bytes: Uint8Array, session?: HostedSession): 
         finish();
         return;
       }
-      if (session?.isPaused) return;
+      if (session?.isPaused) {
+        timer = setTimeout(() => finish(), PAUSE_ABANDON_MS);
+        return;
+      }
       armStartupWatchdog();
       try {
         player.play();

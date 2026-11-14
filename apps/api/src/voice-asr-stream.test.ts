@@ -122,6 +122,59 @@ describe("voice asr relay", () => {
     await vi.waitFor(() => expect(log).toContain("close"));
   });
 
+  it("breaks off a recognizer that takes audio but returns nothing", async () => {
+    const log: string[] = [];
+    // A silent recognizer: it accepts audio and never answers.
+    const opener: StreamAsrOpener = async () =>
+      ({
+        audio: () => log.push("audio"),
+        begin: () => log.push("begin"),
+        finish: () => {},
+        close: () => log.push("close"),
+        results: (async function* () {
+          while (true) {
+            await new Promise<void>(() => {});
+          }
+        })(),
+      }) satisfies StreamAsrSession;
+    const handler = createVoiceAsrUpgradeHandler({
+      resolve: async () => ({ address: "ws://recognizer" }),
+      authenticate: async () => actor,
+      opener,
+    });
+    const ws = await opened(await listen(handler));
+
+    ws.send(JSON.stringify({ type: "start" }));
+    await vi.waitFor(() => expect(log).toContain("begin"));
+    // Collect from here: the frames the watchdog sends may arrive the moment the
+    // fake clock jumps, before any later listener could attach.
+    const message = nextMessage(ws);
+    const closed = new Promise((resolve) => ws.once("close", resolve));
+    // The connection and its setup ran on real timers; only the watchdog's wait
+    // is faked, and only as a clock — the socket's own writes must keep flowing.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      ws.send(new Uint8Array([1, 2, 3]));
+      // Let the frame reach the relay before the fake clock jumps: the watchdog
+      // is armed when the audio arrives, not when it is sent.
+      for (let i = 0; i < 50 && !log.includes("audio"); i += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(log).toContain("audio");
+      vi.advanceTimersByTime(15_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(await message).toEqual({
+      type: "error",
+      message: "The recognizer stopped responding.",
+    });
+    await closed;
+    await vi.waitFor(() => expect(log).toContain("close"));
+  });
+
   it("refuses a connection without a saved streaming address", async () => {
     const handler = createVoiceAsrUpgradeHandler({
       resolve: async () => null,

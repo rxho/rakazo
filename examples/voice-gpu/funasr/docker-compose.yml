@@ -19,6 +19,10 @@ services:
     # process ends). Run the server binary itself in the foreground, with TLS
     # off (the relay speaks plain ws://). First start downloads the models
     # from ModelScope into ./funasr-resources.
+    # No --vad-dir: the server-side VAD ends utterances mid-sentence (a
+    # breath becomes a final), while calls hand the turn themselves after a
+    # quiet gap — so offline results arrive only when the client says the
+    # utterance is over.
     # The arg parser wants space-separated "--flag value", not "--flag=value".
     command:
       - /workspace/FunASR/runtime/websocket/build/bin/funasr-wss-server-2pass
@@ -28,8 +32,6 @@ services:
       - damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx
       - --online-model-dir
       - damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx
-      - --vad-dir
-      - damo/speech_fsmn_vad_zh-cn-16k-common-onnx
       - --punc-dir
       - damo/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727-onnx
       - --itn-dir
