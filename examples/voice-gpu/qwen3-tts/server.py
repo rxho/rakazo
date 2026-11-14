@@ -84,6 +84,9 @@ SENTENCE_END = "。！？.!?"
 CJK_END = "。！？"
 # Long unbroken Chinese runs keep listeners waiting; split at these too.
 SOFT_BREAK = "，、；,;:"
+# First-audio latency tracks the FIRST piece's synthesis time (~60ms/token on
+# this GPU), so the opener stays tiny: cut at the earliest soft break.
+FIRST_CHUNK_MAX = 10
 
 
 def split_sentences(text: str, max_chars: int = 48) -> list[str]:
@@ -91,7 +94,8 @@ def split_sentences(text: str, max_chars: int = 48) -> list[str]:
 
     Whole messages synthesize much faster as one batch of short pieces than as
     one long prompt (GPU decode length dominates), and Rakazo's self-hosted
-    speak call sends whole messages.
+    speak call sends whole messages. The first piece is additionally capped so
+ playback starts within a couple of seconds.
     """
     parts: list[str] = []
     start = 0
@@ -116,7 +120,12 @@ def split_sentences(text: str, max_chars: int = 48) -> list[str]:
             part = part[cut + 1 :].strip()
         if part:
             out.append(part)
-    return out
+    if len(out) > 1 and len(out[0]) > FIRST_CHUNK_MAX:
+        head = out[0]
+        cut = min([head.find(c) for c in SOFT_BREAK if 0 <= head.find(c) < FIRST_CHUNK_MAX] or [-1])
+        if cut >= 2:  # a real clause, not a stray mark
+            out[0:1] = [head[: cut + 1].strip(), head[cut + 1 :].strip()]
+    return [p for p in out if p]
 
 
 def synthesize(text: str, speaker: str, language: str) -> tuple[bytes, int]:
