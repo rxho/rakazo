@@ -174,6 +174,8 @@ function serverRecognizer(target: ServerAsrTarget, native: StreamAsrModule): Spe
   let banked = "";
   /** The growing words of the utterance being spoken. */
   let heard = "";
+  /** Whether the live decoder heard anything this utterance. */
+  let windows = 0;
   const emitResult = (text: string, isFinal: boolean) => {
     for (const listener of resultListeners) listener({ isFinal, results: [{ transcript: text }] });
   };
@@ -182,17 +184,23 @@ function serverRecognizer(target: ServerAsrTarget, native: StreamAsrModule): Spe
       if (final) {
         // The revision covers this utterance since its begin; anything the live
         // windows already added is replaced by it.
-        heard = "";
         const revision = text.replace(/\s+/g, " ").trim();
-        if (!revision) return;
+        const live = windows > 0;
+        heard = "";
+        windows = 0;
+        // A syllable the live decoder never heard is the recognizer hearing
+        // breath or hum in room noise, not the caller speaking.
+        if (!revision || (!live && revision.length <= 1)) return;
         banked = join(banked, revision);
         emitResult(revision, true);
         return;
       }
       // The live windows are sequential slivers of the words being spoken; they
       // join, and the display grows with them.
-      heard = join(heard, text.trim());
-      if (!heard) return;
+      const window = text.trim();
+      if (!window) return;
+      windows += 1;
+      heard = join(heard, window);
       emitResult(heard, false);
     }),
     native.addListener("onError", () =>
@@ -205,6 +213,7 @@ function serverRecognizer(target: ServerAsrTarget, native: StreamAsrModule): Spe
     start(options) {
       banked = "";
       heard = "";
+      windows = 0;
       // A slow or refused connection surfaces as its error event, like the OS engines.
       void native.start(target.url, target.headers, options.lang).then(
         (opened) => {

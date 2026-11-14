@@ -222,32 +222,48 @@ class StreamAsrModule : Module() {
       AudioFormat.CHANNEL_IN_MONO,
       AudioFormat.ENCODING_PCM_16BIT,
     )
-    val record = try {
-      AudioRecord(
-        MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-        rate,
-        AudioFormat.CHANNEL_IN_MONO,
-        AudioFormat.ENCODING_PCM_16BIT,
-        maxOf(minBuffer, frameBytes * 4),
-      )
-    } catch (e: Exception) {
-      note("microphone constructor failed: ${e.message}")
-      sendEvent("onError", mapOf("message" to "microphone unavailable"))
-      stopNow("mic constructor failed")
-      return
+    // The unprocessed source first: the communication source's echo cancelling
+    // eats the caller's own words whenever the speaker is playing — the head of
+    // a reply spoken over the greeting, or a cut-in spoken over the bot — and
+    // the bot's echo in what remains is filtered by the app's own logic.
+    val sources = listOf(
+      MediaRecorder.AudioSource.UNPROCESSED,
+      MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+    )
+    var record: AudioRecord? = null
+    var source = 0
+    for (candidate in sources) {
+      val opened = try {
+        AudioRecord(
+          candidate,
+          rate,
+          AudioFormat.CHANNEL_IN_MONO,
+          AudioFormat.ENCODING_PCM_16BIT,
+          maxOf(minBuffer, frameBytes * 4),
+        )
+      } catch (e: Exception) {
+        note("microphone constructor failed for source $candidate: ${e.message}")
+        null
+      }
+      if (opened != null && opened.state == AudioRecord.STATE_INITIALIZED) {
+        record = opened
+        source = candidate
+        break
+      }
+      opened?.release()
     }
-    if (record.state != AudioRecord.STATE_INITIALIZED) {
-      note("microphone not initialized (state=${record.state})")
-      record.release()
+    if (record == null) {
+      note("microphone not initialized on any source")
       sendEvent("onError", mapOf("message" to "microphone unavailable"))
       stopNow("mic not initialized")
       return
     }
+    note("microphone recording from source $source")
     recorder = record
     record.startRecording()
-    note("microphone recording")
     val loop = Thread {
       var sent = 0L
+      var quietFrames = 0
       val buffer = ByteArray(frameBytes)
       while (!closing.get()) {
         val read = try {
@@ -258,6 +274,20 @@ class StreamAsrModule : Module() {
         }
         if (read <= 0) continue
         val chunk = if (read == frameBytes) buffer else buffer.copyOf(read)
+        // The loudest sample of this frame: a capture that eats the caller's
+        // words shows up here as silence they break through.
+        var peak = 0
+        for (index in 0 until read - 1 step 160) {
+          val low = chunk[index].toInt() and 0xFF
+          val high = chunk[index + 1].toInt()
+          val sample = kotlin.math.abs(((high shl 8) or low).toShort().toInt())
+          if (sample > peak) peak = sample
+        }
+        if (peak < 128) quietFrames += 1 else quietFrames = 0
+        if (sent % 50 == 0L || (peak >= 128 && quietFrames >= 30)) {
+          note("mic level: frame=$sent peak=$peak quiet=$quietFrames")
+          quietFrames = 0
+        }
         var dead = false
         synchronized(pending) {
           val target = socket
