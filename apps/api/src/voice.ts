@@ -13,6 +13,7 @@ import {
   NoVoiceConfigured,
   OPENAI_COMPATIBLE_VOICE_PROVIDER_ID,
   openAiCompatibleVoiceServer,
+  parseOpenAiCompatibleVoiceSecret,
   resolveVoiceKey,
   serializeOpenAiCompatibleVoiceSecret,
   voiceCatalogEntry,
@@ -106,15 +107,45 @@ export function catalogEntry(provider: string) {
   return voiceCatalogEntry(provider);
 }
 
-export function toVoiceStatus(cred: { provider: string; voiceId: string } | null): VoiceStatus {
+export function toVoiceStatus(
+  cred: { provider: string; voiceId: string } | null,
+  streamAsr = false,
+): VoiceStatus {
   const entry = cred ? catalogEntry(cred.provider) : undefined;
   return {
     configured: Boolean(cred),
     ready: Boolean(cred?.voiceId),
     transcribe: Boolean(entry?.transcribe && cred),
+    streamAsr,
     provider: cred?.provider ?? null,
     voiceId: cred?.voiceId ?? "",
   };
+}
+
+/**
+ * The streaming-recognition address of the caller's default self-hosted voice
+ * connection, when it has one. The relay route dials it for live audio.
+ */
+export async function defaultVoiceAsrStreamUrl(
+  deps: VoiceDeps,
+  actor: Pick<Actor, "userId" | "spaceId">,
+  scope?: SettingsScope,
+): Promise<string | null> {
+  const cred = await findDefaultVoiceCredential(deps.prisma, actor, scope);
+  if (!cred || cred.provider !== OPENAI_COMPATIBLE_VOICE_PROVIDER_ID) return null;
+  try {
+    const secret = await deps.prisma.secret.findFirst({
+      where: { id: cred.secretId, userId: actor.userId, spaceId: null },
+    });
+    if (!secret) return null;
+    const parsed = parseOpenAiCompatibleVoiceSecret(
+      await deps.secrets.load(secret.ciphertext, secret.id),
+    );
+    return parsed.asrStreamUrl ?? null;
+  } catch {
+    // An unreadable secret still speaks the ordinary way.
+    return null;
+  }
 }
 
 export function toVoiceCredential(row: {
@@ -123,7 +154,7 @@ export function toVoiceCredential(row: {
   isDefault: boolean;
   voiceId: string;
   speechModel?: string | null;
-  server?: { endpoint: string; ttsModel: string; sttModel: string };
+  server?: { endpoint: string; ttsModel: string; sttModel: string; asrStreamUrl: string };
   /** False when the connection uses the account's model connection instead of a key. */
   hasKey?: boolean;
 }): VoiceCredential {
@@ -138,6 +169,7 @@ export function toVoiceCredential(row: {
     endpoint: row.server?.endpoint ?? "",
     ttsModel: row.server?.ttsModel ?? "",
     sttModel: row.server?.sttModel ?? "",
+    asrStreamUrl: row.server?.asrStreamUrl ?? "",
   };
 }
 
@@ -206,6 +238,7 @@ export function voiceCredentialPlaintext(input: {
   baseUrl?: string;
   ttsModel?: string;
   sttModel?: string;
+  asrStreamUrl?: string;
   /** The stored secret for this provider; blank fields keep its key and models. */
   previousPlaintext?: string;
   allowPrivateEndpoint?: boolean;
@@ -231,6 +264,7 @@ export function voiceCredentialPlaintext(input: {
         apiKey: input.plaintext,
         ttsModel: input.ttsModel,
         sttModel: input.sttModel,
+        asrStreamUrl: input.asrStreamUrl,
       },
       input.previousPlaintext,
       { allowPrivate: input.allowPrivateEndpoint },
@@ -356,6 +390,7 @@ export async function persistVoiceCredential(
     baseUrl?: string;
     ttsModel?: string;
     sttModel?: string;
+    asrStreamUrl?: string;
     /** Which copy the connection becomes the default voice in; omitted is what applies. */
     scope?: SettingsScope;
     signal?: AbortSignal;

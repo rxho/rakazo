@@ -288,7 +288,13 @@ importers:
       tsx:
         specifier: 4.23.15
         version: 4.23.15
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
     devDependencies:
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -19673,7 +19679,7 @@ snapshots:
 
   '@types/ws@8.18.2':
     dependencies:
-      '@types/node': 24.19.2
+      '@types/node': 26.5.0
 
   '@types/yargs-parser@21.0.3': {}
 

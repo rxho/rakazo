@@ -1,0 +1,19 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.rakazostreamasr'
+version = '0.1.0'
+
+android {
+  namespace 'expo.modules.rakazostreamasr'
+  defaultConfig {
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  // React Native already ships OkHttp; the explicit entry only pins a floor.
+  implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

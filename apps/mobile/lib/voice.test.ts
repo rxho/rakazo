@@ -16,6 +16,7 @@ import {
   setCallAudio,
   setDictationAudio,
   speakQueue,
+  speakStream,
   speakText,
   speakUtterance,
   speakWithDeviceVoice,
@@ -1308,5 +1309,94 @@ describe("on-device speech", () => {
 
     calls[1]?.options?.onDone?.();
     await expect(second).resolves.toBe(true);
+  });
+});
+
+describe("streamed speech", () => {
+  beforeEach(() => {
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue(null);
+    vi.mocked(captureApiRequestContext).mockResolvedValue({
+      apiBase: "https://support.example",
+      headers: { authorization: "Bearer support-token" },
+    });
+    vi.mocked(rpc).mockImplementation(async (proc) => {
+      if (proc === "aiConsent/status") return { version: "2026-09-14", recipients: [] } as never;
+      return { ready: true, utterances: [] } as never;
+    });
+    vi.stubGlobal("Audio", FakeAudio);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200 })),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("plays each arriving utterance and resolves once the last one ends", async () => {
+    const handle = speakStream({ botId: "bot-1" });
+    handle.push("First sentence.");
+    handle.push("Second sentence.");
+    const spoken = handle.finish();
+    await expect(spoken).resolves.toBe(true);
+    const bodies = vi
+      .mocked(fetch)
+      .mock.calls.map(([, init]) => JSON.parse(String(init?.body)).text);
+    expect(bodies).toEqual(["First sentence.", "Second sentence."]);
+  });
+
+  it("prepares with the first utterance and never fetches before one arrives", async () => {
+    const handle = speakStream({ botId: "bot-1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rpc).not.toHaveBeenCalledWith("voice/prepare", expect.anything(), expect.anything());
+    handle.push("First sentence.");
+    handle.finish();
+    await waitFor(() => vi.mocked(rpc).mock.calls.some(([proc]) => proc === "voice/prepare"));
+    expect(vi.mocked(rpc)).toHaveBeenCalledWith(
+      "voice/prepare",
+      { text: "First sentence.", voiceId: undefined, botId: "bot-1", scope: undefined },
+      expect.anything(),
+    );
+  });
+
+  it("resolves false when no voice is set up", async () => {
+    vi.mocked(rpc).mockImplementation(async (proc) => {
+      if (proc === "aiConsent/status") return { version: "2026-09-14", recipients: [] } as never;
+      // The account's voice provider stays configured; only prepare says it is not ready.
+      if (proc === "voice/status") return { ready: true } as never;
+      return { ready: false, utterances: [] } as never;
+    });
+    const handle = speakStream({ botId: "bot-1" });
+    handle.push("First sentence.");
+    await expect(handle.finish()).resolves.toBe(false);
+  });
+
+  it("ends early and still resolves when a newer speech takes over", async () => {
+    const owner = createSpeechOwner();
+    const handle = speakStream({ botId: "bot-1", owner });
+    handle.push("First sentence.");
+    await waitFor(() => vi.mocked(fetch).mock.calls.length > 0);
+    stopSpeaking(owner);
+    await expect(handle.finish()).resolves.toBe(true);
+  });
+
+  it("speaks a growing device-voice reply utterance by utterance", async () => {
+    vi.mocked(SecureStore.getItemAsync).mockImplementation(async (key) =>
+      key === DEVICE_VOICE_KEY ? "1" : null,
+    );
+    const calls: Array<{ text: string; options?: { onDone?: () => void } }> = [];
+    vi.mocked(Speech.speak).mockImplementation(
+      ((text: string, options: { onDone?: () => void }) => {
+        calls.push({ text, options });
+        options?.onDone?.();
+      }) as never,
+    );
+    const handle = speakStream({ botId: "bot-1" });
+    handle.push("第一句。");
+    handle.push("第二句。");
+    await expect(handle.finish()).resolves.toBe(true);
+    expect(calls.map((call) => call.text)).toEqual(["第一句。", "第二句。"]);
   });
 });

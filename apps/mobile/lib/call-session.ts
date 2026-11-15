@@ -10,6 +10,7 @@ import {
   callTurn,
   createCallSendTracker,
   createInterimBargeIn,
+  createUtteranceStream,
   isCallBargeIn,
   isFarewell,
   isRetryableError,
@@ -38,7 +39,7 @@ import {
   startWaitSound,
   stopWaitSound,
 } from "./call-sounds";
-import type { DictationGiveUp } from "./dictation";
+import type { DictationGiveUp, ServerAsrTarget } from "./dictation";
 import * as dictation from "./dictation";
 import { hapticImpact, hapticSuccess } from "./haptics";
 import { deviceLanguage, getActiveUiLocale } from "./i18n";
@@ -48,12 +49,13 @@ import { reportMobileError } from "./monitoring";
 import { fetchServer } from "./server-headers";
 import { currentSessionGeneration, subscribeSessionGeneration } from "./session";
 import { errorText, voiceAccountErrorText } from "./user-error";
-import type { SpeechOwner } from "./voice";
+import type { SpeechOwner, StreamSpeechHandle } from "./voice";
 import {
   createSpeechOwner,
   ensureVoiceConsent,
   setCallAudio,
   setDictationAudio,
+  speakStream,
   speakText,
   stopSpeaking,
 } from "./voice";
@@ -105,6 +107,11 @@ export type CallDeps = {
   /** Tells the server the caller hung up, so it files the call marker and the wrap-up run. */
   endCall: (botId: string, callId: string) => Promise<void>;
   speak: (botId: string, text: string) => Promise<void>;
+  /**
+   * Starts speaking a reply whose sentences arrive over time, when the platform
+   * supports it; without it the settled reply speaks through `speak` instead.
+   */
+  speakStream?: (botId: string) => StreamSpeechHandle;
   /** Cuts the reply off when the caller talks over it. */
   stopSpeaking: () => void;
   /** The opening cue as the call starts, the closing one once the caller's turn is heard. */
@@ -118,6 +125,8 @@ export type CallDeps = {
     onCallEnded: (ended: CallEnded) => void,
     /** Every update of the call's thread, so a turn can answer what the bot is waiting on. */
     onThread: (thread: MobileSnapshot) => void,
+    /** Growing text of the reply whose run is still working, so speech can start early. */
+    onStreamText?: (messageId: string, text: string, runId?: string) => void,
   ) => () => void;
 };
 
@@ -171,6 +180,18 @@ let consentBlocked = false;
 let botEndedCall = false;
 let hangUpTimer: ReturnType<typeof setTimeout> | null = null;
 let spokenMessageId: string | null = null;
+/**
+ * The reply being spoken while its run still writes it: sentences are planned
+ * out of the growing text and queued as they complete, and the settled text
+ * finishes it. Null the moment a reply settles or a newer turn takes over.
+ */
+let replyStream: {
+  messageId: string;
+  planner: ReturnType<typeof createUtteranceStream>;
+  handle: StreamSpeechHandle;
+  /** presentReply already moved the call to speaking for this stream. */
+  presented: boolean;
+} | null = null;
 /** The call's thread as the live feed last reported it. */
 let thread: MobileSnapshot | null = null;
 /** The microphone stays shut while the bot waits on a code typed on screen. */
@@ -253,6 +274,8 @@ export function startCall(
     botColor?: string;
     botAvatarSet?: BotAvatarSet;
     transcribe?: boolean;
+    /** The voice provider streams live audio, so dictation rides it instead of the OS engine. */
+    streamAsr?: boolean;
     /** Spoken as the call connects, before the caller's first turn. */
     greeting?: string;
     answered?: { callId: string };
@@ -268,6 +291,7 @@ export function startCall(
   endCall();
   callSessionGeneration = currentSessionGeneration();
   deps = { ...productionDeps(call.requestContext), ...overrides };
+  dictation.setServerAsr(call.streamAsr ? serverAsrTarget(call.requestContext) : null);
   switchBot = call.switchBot;
   callId = call.answered?.callId ?? newClientId();
   callRunId = null;
@@ -291,9 +315,17 @@ export function startCall(
   };
   // An ended call's watcher can still deliver a buffered snapshot; it must not reach this call.
   const watchedCallId = callId;
-  unwatch = deps.watch(call.botId, onReply, onCallEnded, (next) => {
-    if (callId === watchedCallId) onThread(next);
-  });
+  unwatch = deps.watch(
+    call.botId,
+    onReply,
+    onCallEnded,
+    (next) => {
+      if (callId === watchedCallId) onThread(next);
+    },
+    (messageId, text, runId) => {
+      if (callId === watchedCallId) onStreamText(messageId, text, runId);
+    },
+  );
   emit();
   void openCall(callId, call.greeting);
   return callId;
@@ -350,6 +382,8 @@ export function endCall(): void {
   }
   turn?.abort();
   turn = null;
+  // The streaming recognizer belongs to the call; dictation falls back to the device's own.
+  dictation.setServerAsr(null);
   if (state) void deps.audio(false).catch(() => undefined);
   unwatch?.();
   unwatch = null;
@@ -361,6 +395,8 @@ export function endCall(): void {
   botEndedCall = false;
   callRunId = null;
   spokenMessageId = null;
+  // Any half-spoken stream dies with the call; stopSpeaking above already cut it.
+  replyStream = null;
   thread = null;
   heldForCode = false;
   failures = 0;
@@ -643,6 +679,17 @@ async function handleTranscript(raw: string): Promise<void> {
   } finally {
     releasePendingSend?.();
   }
+  // The caller keeps the microphone while the bot works, so a spoken phrase
+  // steers the run instead of waiting its reply out — once this turn's request
+  // was accepted. Only the recognizer path: the recorder would tape the
+  // waiting sound and never find its silence.
+  if (
+    state?.phase === "thinking" &&
+    callId === turnCallId &&
+    turnSeq === cueTurn &&
+    onDevice === true
+  )
+    void openMic();
 }
 
 function failTurn(error: unknown): void {
@@ -689,11 +736,81 @@ function heardInterim(text: string): void {
 
 function onReply(messageId: string, text: string, runId?: string): void {
   // Work the bot files after hanging up belongs in the thread, not in the caller's ear.
-  if (!state || switching || botEndedCall || messageId === spokenMessageId) return;
+  if (!state || switching || botEndedCall) return;
   // A reply to something typed into the thread mid-call belongs on screen only.
   if (callRunId && runId && runId !== callRunId) return;
+  // A streamed reply finishes its own speech; what it already said stands.
+  if (settleStreamedReply(messageId, text)) return;
+  if (messageId === spokenMessageId) return;
   spokenMessageId = messageId;
   speakAndListen(text);
+}
+
+/** Growing text of the reply whose run is still working: start speech early. */
+function onStreamText(messageId: string, text: string, runId?: string): void {
+  if (!state || switching || botEndedCall) return;
+  // The stream's own message must keep flowing; only other replies are spent.
+  if (replyStream?.messageId !== messageId && messageId === spokenMessageId) return;
+  // A reply to something typed into the thread mid-call belongs on screen only.
+  if (callRunId && runId && runId !== callRunId) return;
+  if (replyStream?.messageId !== messageId) {
+    // One stream at a time: a newer reply's stream replaces nothing here.
+    if (replyStream || !deps.speakStream || !text.trim()) return;
+    spokenMessageId = messageId;
+    replyStream = {
+      messageId,
+      planner: createUtteranceStream(),
+      handle: deps.speakStream(state.botId),
+      presented: false,
+    };
+  }
+  const stream = replyStream;
+  const fresh = stream.planner.push(text);
+  if (!fresh.length) return;
+  for (const utterance of fresh) {
+    stream.handle.push(utterance);
+    // What is audible is what the microphone might catch back.
+    spokenMemory.remember(utterance);
+  }
+  if (!stream.presented) {
+    stream.presented = true;
+    presentReply(fresh.join(" "), async () => {
+      const spoken = await stream.handle.done();
+      if (!spoken) throw new Error(t`Add a voice provider in Voice settings.`);
+    });
+  }
+}
+
+/**
+ * Finishes the stream a settling reply was speaking through; false when no
+ * stream matches, so the caller speaks the settled reply the ordinary way.
+ */
+function settleStreamedReply(messageId: string, text: string): boolean {
+  const stream = replyStream;
+  if (!stream || stream.messageId !== messageId) return false;
+  replyStream = null;
+  spokenMessageId = messageId;
+  for (const utterance of stream.planner.finish(text)) stream.handle.push(utterance);
+  if (stream.presented && state) {
+    // The transcript shows the settled reply, not the fragment speech began on.
+    const exchanges = [...state.exchanges];
+    for (let index = exchanges.length - 1; index >= 0; index -= 1) {
+      if (exchanges[index]?.role === "bot") {
+        exchanges[index] = { role: "bot", text };
+        break;
+      }
+    }
+    set({ exchanges });
+    // Closing the queue lets the last queued clips drain into the running speech.
+    void stream.handle.finish();
+    return true;
+  }
+  // Nothing was ever safe to start early; speak the settled reply in one go.
+  presentReply(text, async () => {
+    const spoken = await stream.handle.finish();
+    if (!spoken) throw new Error(t`Add a voice provider in Voice settings.`);
+  });
+  return true;
 }
 
 /** Keeps the thread current, and the microphone shut while the bot waits on a typed code. */
@@ -757,6 +874,13 @@ async function switchCall(target: CallSwitch, heard: string): Promise<void> {
 function speakAndListen(text: string): void {
   if (!state) return;
   const { botId } = state;
+  presentReply(text, () => deps.speak(botId, text));
+}
+
+/** One bot reply, from its first spoken word to the microphone coming back. */
+function presentReply(text: string, speech: () => Promise<void>): void {
+  if (!state) return;
+  const { botId } = state;
   const speakingCallId = callId;
   // Bump before anything else: this attempt supersedes all older ones, even if it then
   // declines to speak, so only the newest speech below may run its handlers.
@@ -784,8 +908,7 @@ function speakAndListen(text: string): void {
   }
   set({ phase: "speaking", heard: "" });
   if (onDevice) void openMic();
-  void deps
-    .speak(botId, text)
+  void speech()
     .catch((error: unknown) => {
       if (superseded()) return;
       if (error instanceof AiConsentBlocked) {
@@ -807,6 +930,18 @@ function speakAndListen(text: string): void {
       if (bargedIn) return;
       void listen();
     });
+}
+
+/** The relay address live call audio streams to, signed like every other request. */
+function serverAsrTarget(requestContext?: ApiRequestContext): ServerAsrTarget | null {
+  const apiBase = requestContext?.apiBase;
+  const headers = requestContext?.headers;
+  // Without the call's own context there is nothing to sign the socket with.
+  if (!apiBase || !headers) return null;
+  return {
+    url: `${apiBase.replace(/^http/, "ws")}/api/voice/asr`,
+    headers,
+  };
 }
 
 /** The bot hung up: speak the goodbye it wrote, then end — the rest lands in the thread. */
@@ -875,6 +1010,7 @@ function productionDeps(requestContext?: ApiRequestContext): CallDeps {
       ),
     endCall: async (botId, id) => closeCall(botId, id, await callContext()),
     speak: (botId, text) => speakReply(botId, text, speechOwner, requestContext),
+    speakStream: (botId) => speakStream({ botId, owner: speechOwner, requestContext }),
     stopSpeaking: () => stopSpeaking(speechOwner),
     audio: setCallAudio,
     cue: playCallCue,
@@ -884,8 +1020,8 @@ function productionDeps(requestContext?: ApiRequestContext): CallDeps {
       else if (action === "preload") void preloadWaitSound().catch(() => undefined);
       else releaseWaitSound();
     },
-    watch: (botId, onReply, onEnded, onThread) =>
-      watchReplies(botId, onReply, onEnded, onThread, requestContext),
+    watch: (botId, onReply, onEnded, onThread, onStreamText) =>
+      watchReplies(botId, onReply, onEnded, onThread, onStreamText, requestContext),
   };
   return own;
 }
@@ -1046,6 +1182,7 @@ function watchReplies(
   onNewReply: (messageId: string, text: string, runId?: string) => void,
   onEnded: (ended: CallEnded) => void,
   onThread: (thread: MobileSnapshot) => void,
+  onStreamText?: (messageId: string, text: string, runId?: string) => void,
   requestContext?: ApiRequestContext,
 ): () => void {
   const controller = new AbortController();
@@ -1092,13 +1229,19 @@ function watchReplies(
             const message = latestSpokenCallReply(snapshot.messages, watchedCallId);
             if (!message || message.id === lastSeen) return;
             // Wait for the message's own run to settle so half-written blocks are never
-            // spoken; another run still working says nothing about this one.
+            // spoken whole; another run still working says nothing about this one.
             // An answered question can resume a run behind the one the thread shows first, so
             // look the message's run up among every active run.
             const run =
               snapshot?.activeRuns?.find((active) => active.id === message.runId) ?? snapshot?.run;
             const fromAnotherRun = Boolean(message.runId && message.runId !== run?.id);
-            if (!fromAnotherRun && run && ACTIVE_RUN_STATUSES.some((s) => s === run.status)) return;
+            if (!fromAnotherRun && run && ACTIVE_RUN_STATUSES.some((s) => s === run.status)) {
+              // The run is still writing this reply: offer what is already safe to
+              // speak, so a streaming voice starts before the run settles.
+              const growing = blockText(message).trim();
+              if (growing) onStreamText?.(message.id, growing, message.runId);
+              return;
+            }
             const text = blockText(message).trim();
             if (!text) return;
             lastSeen = message.id;

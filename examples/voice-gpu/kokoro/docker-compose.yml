@@ -1,0 +1,25 @@
+# Kokoro-82M as an OpenAI-compatible speech server: the speed tier next to
+# Qwen3-TTS. Same interface, different trade: a bit less expressive, but a
+# short opener synthesizes in a few hundred milliseconds on plain CPU.
+#
+# Run on the voice host, then swap Rakazo's Voice settings Server URL between:
+#   http://<host>:8810/v1  (Qwen3-TTS, quality)
+#   http://<host>:8820/v1  (Kokoro, speed)
+
+services:
+  kokoro:
+    build: .
+    container_name: kokoro-tts
+    restart: unless-stopped
+    ports:
+      - "8820:8820"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      TTS_MODEL: hexgrad/Kokoro-82M
+      # Weights download through a mirror close to the host; unset for Hugging Face directly.
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+    deploy:
+      resources:
+        limits:
+          memory: 2g

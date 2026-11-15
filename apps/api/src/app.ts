@@ -177,7 +177,8 @@ import { afterSpaceDeparture } from "./space-departure.js";
 import { createSpeechSummarizer } from "./speech-summary.js";
 import { settleWithTimeout } from "./team-chat-startup.js";
 import { endUserDeviceSession, mountUserDeviceRoutes } from "./user-devices.js";
-import { mountVoiceHttpRoutes } from "./voice.js";
+import { defaultVoiceAsrStreamUrl, mountVoiceHttpRoutes } from "./voice.js";
+import { createVoiceAsrUpgradeHandler, VOICE_ASR_CONNECT_PATH } from "./voice-asr-stream.js";
 import { mountWebhookHttpRoutes } from "./webhook.js";
 
 /**
@@ -1071,6 +1072,30 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     if (actor) enrichLogContext({ "user.id": actor.userId, "space.id": actor.spaceId });
     return actor;
   });
+  // Live call audio relays to the caller's streaming recognizer over the same
+  // session as the HTTP voice routes; the hub composes with the device socket's
+  // upgrade listener in `handleUpgrade`.
+  const voiceAsr = createVoiceAsrUpgradeHandler({
+    resolve: async (actor, scope) => {
+      // Upgrades carry no request context, so the saved-address lookup states
+      // its own system scope instead of tripping row security mid-handshake.
+      const address = await runAsSystem(
+        "the voice asr relay reads the caller's saved recognizer address",
+        () => defaultVoiceAsrStreamUrl({ prisma, secrets, env }, actor, scope),
+      );
+      return address ? { address } : null;
+    },
+    authenticate: async (request) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (Array.isArray(value)) for (const item of value) headers.append(name, item);
+        else if (value !== undefined) headers.set(name, value);
+      }
+      const target = `http://${request.headers.host ?? "localhost"}${request.url ?? "/"}`;
+      const session = await requestSession(new Request(target, { headers }));
+      return session?.actor ?? null;
+    },
+  });
   mountAccountImportRoute(
     app,
     {
@@ -1168,7 +1193,14 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     runtime,
     awaitIdle: inMemoryJobs ? () => inMemoryJobs.awaitIdle() : undefined,
     backgroundFailures: inMemoryJobs ? () => inMemoryJobs.failureCounts() : undefined,
-    handleUpgrade: userDeviceHub?.handleUpgrade,
+    handleUpgrade: (request, socket, head) => {
+      const path = new URL(request.url ?? "/", "http://upgrade").pathname;
+      if (path === VOICE_ASR_CONNECT_PATH) {
+        voiceAsr.handleUpgrade(request, socket, head);
+        return;
+      }
+      userDeviceHub?.handleUpgrade(request, socket, head);
+    },
     stop: async () => {
       // Handlers still running would otherwise query the pool after it ends.
       const requestsSettled = settleWithTimeout(inFlight.settled(), REQUEST_DRAIN_MS);

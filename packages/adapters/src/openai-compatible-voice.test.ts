@@ -78,6 +78,7 @@ describe("serializeOpenAiCompatibleVoiceSecret", () => {
       endpoint: "http://192.168.1.20:8880/v1",
       ttsModel: "kokoro",
       sttModel: "whisper-1",
+      asrStreamUrl: "",
     });
   });
 

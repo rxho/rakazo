@@ -37,7 +37,7 @@ import { speakText } from "../../lib/voice";
 
 const DEVICE_CHOICE = "device";
 
-type VoiceField = "voiceId" | "speechModel" | "baseUrl" | "ttsModel" | "sttModel";
+type VoiceField = "voiceId" | "speechModel" | "baseUrl" | "ttsModel" | "sttModel" | "asrStreamUrl";
 
 /** A Space's override is read from that Space even when another one is selected. */
 const targetSpace = (target: SettingsTarget) =>
@@ -100,6 +100,7 @@ export default function VoiceSettings() {
   const [baseUrl, setBaseUrl] = useState(cached?.credential?.endpoint ?? "");
   const [ttsModel, setTtsModel] = useState(cached?.credential?.ttsModel ?? "");
   const [sttModel, setSttModel] = useState(cached?.credential?.sttModel ?? "");
+  const [asrStreamUrl, setAsrStreamUrl] = useState(cached?.credential?.asrStreamUrl ?? "");
   // Fields typed into since the last load; an opening refresh keeps them only while their
   // provider stays selected.
   const edited = useRef(new Set<VoiceField>());
@@ -158,6 +159,7 @@ export default function VoiceSettings() {
         ["baseUrl", setBaseUrl, cred?.endpoint],
         ["ttsModel", setTtsModel, cred?.ttsModel],
         ["sttModel", setSttModel, cred?.sttModel],
+        ["asrStreamUrl", setAsrStreamUrl, cred?.asrStreamUrl],
       ];
       for (const [field, set, value] of fields) if (!edited.current.has(field)) set(value ?? "");
       if (cred) {
@@ -369,6 +371,8 @@ export default function VoiceSettings() {
               baseUrl: baseUrl.trim(),
               ttsModel: ttsModel.trim() || undefined,
               sttModel: sttModel.trim() || undefined,
+              // Always sent: a blank clears the address, and the server keeps one it had.
+              asrStreamUrl: asrStreamUrl.trim(),
             }
           : {}),
       });
@@ -587,6 +591,17 @@ export default function VoiceSettings() {
                   value={sttModel}
                   onChangeText={edit("sttModel", setSttModel)}
                   placeholder={DEFAULT_COMPATIBLE_STT_MODEL}
+                  placeholderTextColor={native.tertiaryLabel}
+                  style={styles.input}
+                />
+                <Text style={styles.fieldLabel}>{t`Streaming recognition address`}</Text>
+                <TextInput
+                  accessibilityLabel={t`Streaming recognition address`}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  value={asrStreamUrl}
+                  onChangeText={edit("asrStreamUrl", setAsrStreamUrl)}
+                  placeholder="ws://192.168.1.20:10095"
                   placeholderTextColor={native.tertiaryLabel}
                   style={styles.input}
                 />

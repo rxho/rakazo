@@ -167,6 +167,7 @@ export * from "./page-browser-session.js";
 export * from "./page-share-secrets.js";
 export * from "./paid-services-factory.js";
 export * from "./parallel-web.js";
+export * from "./stream-asr.js";
 export * from "./payment-wallet-factory.js";
 export * from "./payment-wallets.js";
 export * from "./pi-catalog-availability.js";

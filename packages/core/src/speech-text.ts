@@ -158,7 +158,55 @@ export function speakable(input: string): string {
 }
 
 const BOUNDARY =
-  /(?<!\b(?:e\.g|i\.e|etc|vs|Dr|Mr|Mrs|Ms|No|approx))(?<![.\d])([.!?])(["')\]]*)\s+/g;
+  /(?<!\b(?:e\.g|i\.e|etc|vs|Dr|Mr|Mrs|Ms|No|approx))(?<![.\d])([.!?])(["')\]]*)\s+|([。！？])(["')\]]*)\s*/g;
+
+/** Marks a sentence boundary wherever the two BOUNDARY branches matched. */
+function markBoundaries(text: string): string {
+  const MARK = "\u0000";
+  return text.replace(
+    BOUNDARY,
+    (...match: string[]) => `${match[1] ?? match[3]}${match[2] ?? match[4] ?? ""}${MARK}`,
+  );
+}
+
+/**
+ * Releases utterances from a reply as it grows: a sentence is speakable once
+ * later text proves it complete, and `finish` releases everything the settled
+ * reply still holds. A revision behind what was already released waits for the
+ * settled text, which then speaks only the changed tail.
+ */
+export function createUtteranceStream(): {
+  push(text: string): string[];
+  finish(text: string): string[];
+} {
+  let released: string[] = [];
+  const commonPrefix = (list: string[]): number => {
+    let kept = 0;
+    while (kept < released.length && kept < list.length && released[kept] === list[kept]) kept += 1;
+    return kept;
+  };
+  // No gluing: a completed sentence must not wait on the fragment behind it.
+  const options = { minChars: 0 };
+  return {
+    push(text: string): string[] {
+      const utterances = toUtterances(text, options);
+      // The last one may still grow; everything before it is safe to start on.
+      const ready = utterances.slice(0, -1);
+      // Text lost ground on what was already released: a revision is in flight,
+      // and guessing which words survive can only repeat or drop speech.
+      if (commonPrefix(ready) !== released.length) return [];
+      const fresh = ready.slice(released.length);
+      released = ready;
+      return fresh;
+    },
+    finish(text: string): string[] {
+      const utterances = toUtterances(text, options);
+      const fresh = utterances.slice(commonPrefix(utterances));
+      released = utterances;
+      return fresh;
+    },
+  };
+}
 
 /**
  * Split speakable text into utterances a synthesizer can start on.
@@ -173,13 +221,15 @@ export function toUtterances(input: string, { minChars = 12, maxChars = 320 } = 
   if (!text) return [];
 
   const MARK = "\u0000";
-  const rough = text
-    .replace(BOUNDARY, `$1$2${MARK}`)
+  const rough = markBoundaries(text)
     .split(MARK)
     .map((s) => s.trim())
     .filter(Boolean);
 
   const out: string[] = [];
+  // A CJK sentence ender is a complete prosodic unit however short, so a Chinese
+  // sentence never waits glued to its neighbour the way a stray English word does.
+  const CJK_ENDED = /[。！？]$/;
   for (const piece of rough) {
     const parts = piece.length <= maxChars ? [piece] : splitLong(piece, maxChars);
     for (const [index, part] of parts.entries()) {
@@ -187,6 +237,8 @@ export function toUtterances(input: string, { minChars = 12, maxChars = 320 } = 
       if (
         index === 0 &&
         prev &&
+        !CJK_ENDED.test(prev) &&
+        !CJK_ENDED.test(part) &&
         (prev.length < minChars || part.length < minChars) &&
         prev.length + 1 + part.length <= maxChars
       ) {
@@ -212,6 +264,9 @@ function splitLong(text: string, maxChars: number): string[] {
       window.lastIndexOf(", "),
       window.lastIndexOf("; "),
       window.lastIndexOf(" — "),
+      window.lastIndexOf("，"),
+      window.lastIndexOf("、"),
+      window.lastIndexOf("；"),
     );
     let cut = at > maxChars / 2 ? at + 1 : window.lastIndexOf(" ");
     if (cut <= 0) {

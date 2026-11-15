@@ -1,0 +1,41 @@
+// Local build accelerator: the file repo feeds artifacts curl fetched (the JVM's
+// traffic is intercepted by the local proxy), and mirrors back the rest.
+
+static void repoFirst(repoHandler) {
+  repoHandler.maven { url 'file:///tmp/m2' }
+  repoHandler.maven { url 'https://maven.aliyun.com/repository/public' }
+  repoHandler.maven { url 'https://maven.aliyun.com/repository/google' }
+  repoHandler.maven { url 'https://plugins.gradle.org/m2' }
+}
+
+static void kotlinAligned(configs) {
+  configs.all { config ->
+    config.resolutionStrategy {
+      force 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.0'
+      force 'org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.2.0'
+      force 'org.jetbrains.kotlin:kotlin-gradle-plugin-annotations:2.2.0'
+    }
+  }
+}
+
+allprojects {
+  buildscript {
+    repositories {
+      repoFirst(delegate)
+    }
+    kotlinAligned(configurations)
+  }
+  repositories {
+    repoFirst(delegate)
+  }
+  kotlinAligned(configurations)
+}
+
+settingsEvaluated { settings ->
+  settings.pluginManagement {
+    repositories {
+      repoFirst(delegate)
+      gradlePluginPortal()
+    }
+  }
+}

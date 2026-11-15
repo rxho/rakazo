@@ -51,6 +51,15 @@ export type SpeechRecognizer = {
     event: Event,
     listener: (payload: DictationEventMap[Event]) => void,
   ): { remove: () => void };
+  /**
+   * `stop` ends one utterance but the recognizer stays ready for the next on the
+   * same connection (the streaming server recognizer). Its authoritative final
+   * revision only arrives after `stop`, and `abort` must still report `end` so a
+   * quiet restart can take the microphone back.
+   */
+  readonly keepsUtterancesOpen?: boolean;
+  /** Drops this recognizer's listeners without ending its connection. */
+  dispose?(): void;
 };
 
 type Session = {
@@ -94,6 +103,176 @@ async function load(): Promise<SpeechRecognizer> {
   return ExpoSpeechRecognitionModule as unknown as SpeechRecognizer;
 }
 
+// The server's own streaming recognizer: live audio relays to it over the call's
+// WebSocket, so dictation works wherever the system recognizer cannot.
+
+/** Where the streaming recognizer listens, with the headers that signed-in requests carry. */
+export type ServerAsrTarget = { url: string; headers: Record<string, string> };
+
+/** The slice of the native module this file needs, so tests can drive the events. */
+type StreamAsrModule = {
+  isAvailable(): boolean;
+  start(url: string, headers: Record<string, string>, lang: string): Promise<boolean>;
+  stop(): void;
+  abort(): void;
+  addListener(
+    event: "onResult",
+    listener: (payload: { text: string; final: boolean }) => void,
+  ): { remove: () => void };
+  addListener(
+    event: "onError",
+    listener: (payload: { message: string }) => void,
+  ): {
+    remove: () => void;
+  };
+  addListener(event: "onEnd", listener: () => void): { remove: () => void };
+};
+
+let serverTarget: ServerAsrTarget | null = null;
+
+/** Points dictation at the server's streaming recognizer, or back at the device's own. */
+export function setServerAsr(target: ServerAsrTarget | null): void {
+  serverTarget = target;
+}
+
+let streamAsrLoader: Promise<StreamAsrModule | null> | null = null;
+let injectedStreamAsr: StreamAsrModule | null | undefined;
+
+/** Test seam: an injected module replaces the native one; null means none. */
+export function setStreamAsrModule(module: StreamAsrModule | null): void {
+  injectedStreamAsr = module;
+  streamAsrLoader = null;
+}
+
+function loadStreamAsr(): Promise<StreamAsrModule | null> {
+  if (injectedStreamAsr !== undefined) return Promise.resolve(injectedStreamAsr);
+  streamAsrLoader ??= (async () => {
+    if (Platform.OS !== "android") return null;
+    try {
+      const { requireNativeModule } = await import("expo-modules-core");
+      const native = requireNativeModule<StreamAsrModule>("RakazoStreamAsr");
+      return native && typeof native.start === "function" ? native : null;
+    } catch {
+      return null;
+    }
+  })();
+  return streamAsrLoader;
+}
+
+/**
+ * The server recognizer as the `SpeechRecognizer` shape the session logic drives.
+ * Its live results are short windows of the words being spoken right now — not
+ * whole revisions — so they are joined into one growing transcript for display,
+ * and the punctuated revision the server sends once the utterance ends is the
+ * only final that counts.
+ */
+function serverRecognizer(target: ServerAsrTarget, native: StreamAsrModule): SpeechRecognizer {
+  const resultListeners = new Set<(event: ResultEvent) => void>();
+  const endListeners = new Set<() => void>();
+  const errorListeners = new Set<(event: ErrorEvent) => void>();
+  /** Words an earlier final of this session already reported. */
+  let banked = "";
+  /** The growing words of the utterance being spoken. */
+  let heard = "";
+  /** Whether the live decoder heard anything this utterance. */
+  let windows = 0;
+  const emitResult = (text: string, isFinal: boolean) => {
+    for (const listener of resultListeners) listener({ isFinal, results: [{ transcript: text }] });
+  };
+  const subs = [
+    native.addListener("onResult", ({ text, final }) => {
+      if (final) {
+        // The revision covers this utterance since its begin; anything the live
+        // windows already added is replaced by it.
+        const revision = text.replace(/\s+/g, " ").trim();
+        const live = windows > 0;
+        heard = "";
+        windows = 0;
+        // A syllable the live decoder never heard is the recognizer hearing
+        // breath or hum in room noise, not the caller speaking.
+        if (!revision || (!live && revision.length <= 1)) return;
+        banked = join(banked, revision);
+        emitResult(revision, true);
+        return;
+      }
+      // The live windows are sequential slivers of the words being spoken; they
+      // join, and the display grows with them.
+      const window = text.trim();
+      if (!window) return;
+      windows += 1;
+      heard = join(heard, window);
+      emitResult(heard, false);
+    }),
+    native.addListener("onError", () =>
+      errorListeners.forEach((listener) => listener({ error: "network" })),
+    ),
+    native.addListener("onEnd", () => endListeners.forEach((listener) => listener())),
+  ];
+  return {
+    keepsUtterancesOpen: true,
+    start(options) {
+      banked = "";
+      heard = "";
+      windows = 0;
+      // A slow or refused connection surfaces as its error event, like the OS engines.
+      void native.start(target.url, target.headers, options.lang).then(
+        (opened) => {
+          if (!opened)
+            errorListeners.forEach((listener) => listener({ error: "service-not-allowed" }));
+        },
+        () => errorListeners.forEach((listener) => listener({ error: "network" })),
+      );
+    },
+    stop() {
+      // Marks the utterance's end; the connection stays for the next one.
+      native.stop();
+    },
+    abort() {
+      // The native module ends quietly on abort; the session logic restarts on
+      // `end`, so report it here while the bridge still can.
+      endListeners.forEach((listener) => listener());
+      native.abort();
+      for (const sub of subs) sub.remove();
+    },
+    dispose() {
+      for (const sub of subs) sub.remove();
+    },
+    isRecognitionAvailable() {
+      return native.isAvailable();
+    },
+    async requestPermissionsAsync() {
+      return { granted: native.isAvailable() };
+    },
+    getSupportedLocales() {
+      return Promise.resolve({ locales: [] });
+    },
+    addListener(event, listener) {
+      if (event === "result") resultListeners.add(listener as (event: ResultEvent) => void);
+      else if (event === "end") endListeners.add(listener as () => void);
+      else errorListeners.add(listener as (event: ErrorEvent) => void);
+      return {
+        remove: () => {
+          resultListeners.delete(listener as (event: ResultEvent) => void);
+          endListeners.delete(listener as () => void);
+          errorListeners.delete(listener as (event: ErrorEvent) => void);
+        },
+      };
+    },
+    // Not reached on Android; kept for the interface.
+    getAudioSessionCategoryAndOptionsIOS() {
+      return { category: "", categoryOptions: [], mode: "" };
+    },
+  } satisfies SpeechRecognizer;
+}
+
+/** The recognizer a dictation session should use, when the server offers streaming. */
+async function loadServer(target: ServerAsrTarget | null): Promise<SpeechRecognizer | null> {
+  if (!target) return null;
+  const native = await loadStreamAsr();
+  if (!native || !native.isAvailable()) return null;
+  return serverRecognizer(target, native);
+}
+
 let supported: Promise<string[]> | null = null;
 
 /**
@@ -116,7 +295,7 @@ let active: Session | null = null;
 /** True when the device can recognise speech itself and the caller allowed it. */
 export async function available(): Promise<boolean> {
   try {
-    const recognizer = await load();
+    const recognizer = (await loadServer(serverTarget)) ?? (await load());
     if (!recognizer.isRecognitionAvailable()) return false;
     return (await recognizer.requestPermissionsAsync()).granted;
   } catch {
@@ -163,7 +342,9 @@ export async function listen(opts: {
   if (opts.signal?.aborted) return;
   stop();
   const mine = token;
-  const recognizer = await load();
+  // The server's streaming recognizer comes first; the device's own engine answers
+  // wherever the server offers none.
+  const recognizer = (await loadServer(serverTarget)) ?? (await load());
   const lang = supportedSpeechTag(opts.lang || "en-US", await supportedLocales(recognizer));
   // A hang-up or a newer session landed while the native module was loading.
   if (token !== mine) return;
@@ -312,15 +493,67 @@ function giveUp(session: Session, reason: DictationGiveUp, code: string): void {
   finish(session, reason);
 }
 
+/** How long the ended utterance's authoritative revision may take to land. */
+export const FINAL_REVISION_WAIT_MS = 1_500;
+
 function finish(session: Session, reason?: DictationGiveUp): void {
   if (active !== session) return;
-  const text = join(session.carried, session.heard).trim();
-  const { onFinal } = session;
-  stop();
-  if (text) onFinal(text);
-  else if (reason) session.onGiveUp?.(reason);
+  active = null;
+  token += 1;
+  const mine = token;
+  clearTimeout(session.silence);
+  clearTimeout(session.restart);
+  clearTimeout(session.quiet);
+  const deliver = () => {
+    // A newer session took the microphone while the revision was awaited.
+    if (token !== mine) return;
+    const text = join(session.carried, session.heard).trim();
+    if (text) session.onFinal(text);
+    else if (reason) session.onGiveUp?.(reason);
+  };
+  if (session.recognizer.keepsUtterancesOpen) {
+    // The words the live windows showed are fragments; end the utterance and let
+    // the server's punctuated revision replace them before they are delivered.
+    // The recognizer's connection stays open for the next utterance of the call.
+    for (const sub of session.subs) sub.remove();
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wait);
+      catcher.remove();
+      session.recognizer.dispose?.();
+      deliver();
+    };
+    const catcher = session.recognizer.addListener("result", (event) => {
+      if (!event.isFinal) return;
+      session.heard = event.results?.[0]?.transcript ?? session.heard;
+      settle();
+    });
+    const wait = setTimeout(settle, FINAL_REVISION_WAIT_MS);
+    try {
+      session.recognizer.stop();
+    } catch {
+      settle();
+    }
+    return;
+  }
+  for (const sub of session.subs) sub.remove();
+  try {
+    session.recognizer.abort();
+  } catch {
+    // already stopped
+  }
+  deliver();
 }
 
+/** CJK text joins without a space; the windows the live decoder sends are unspaced. */
+const cjk = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+
 function join(left: string, right: string): string {
-  return `${left} ${right}`.replace(/\s+/g, " ").trim();
+  if (!left || !right) return `${left}${right}`.replace(/\s+/g, " ").trim();
+  const last = left[left.length - 1] ?? "";
+  const first = right[0] ?? "";
+  const spaced = cjk.test(last) || cjk.test(first) ? "" : " ";
+  return `${left}${spaced}${right}`.replace(/\s+/g, " ").trim();
 }

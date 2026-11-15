@@ -1605,6 +1605,8 @@ export const appContract = {
             baseUrl: z.string().max(2048).optional(),
             ttsModel: z.string().max(200).optional(),
             sttModel: z.string().max(200).optional(),
+            /** Optional streaming-recognition WebSocket beside a self-hosted server. */
+            asrStreamUrl: z.string().max(2048).optional(),
             /** Where the connection becomes the default voice. */
             scope: SettingsScopeSchema.optional(),
           })
