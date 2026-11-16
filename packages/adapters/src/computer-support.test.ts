@@ -1,4 +1,3 @@
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   computerScreenSize,
@@ -76,14 +75,12 @@ describe("Team Computer bot folders", () => {
     expect(requested("~/src")).toBe("src");
   });
 
-  it("tells the bot how its shell reaches the same shared folder as the file tools", () => {
-    const shellDefaultCwd = resolveBotWorkspaceCwd("team", "bot-1", undefined) ?? "";
-    const sharedForFileTools = resolveBotWorkspacePath("team", "bot-1", "shared/report.xlsx");
+  it("tells the bot its shell and the file tools reach the same shared folder", () => {
     const instruction = teamWorkspaceInstruction("bot-1");
-    const shellPath = instruction.match(/(\.\.\/)+shared\//)?.[0];
-    expect(shellPath).toBeDefined();
-    expect(path.posix.join(shellDefaultCwd, `${shellPath}report.xlsx`)).toBe(sharedForFileTools);
-    expect(instruction).toContain("shell cwd of shared");
+    expect(instruction).toContain("the same directory file tools resolve");
+    expect(resolveBotWorkspacePath("team", "bot-1", "shared/report.xlsx")).toBe(
+      "shared/report.xlsx",
+    );
     expect(resolveBotWorkspaceCwd("team", "bot-1", "shared")).toBe("shared");
   });
 

@@ -125,6 +125,48 @@ describe("provider-neutral computer workspace", () => {
     );
   });
 
+  it("links the bot home's shared to the Team's shared, leaving an existing folder alone", async () => {
+    const provider = new FakeSandboxProvider();
+    const computer = await provider.provision(
+      { botId: "team-workspace", homePath: "/ignored" },
+      context,
+    );
+    const execute = vi.spyOn(provider, "execute");
+    await ensureComputerWorkspaceLayout(provider, computer, "team", "bot-1", context);
+
+    const link = execute.mock.calls.find(([, request]: [ComputerRef, CommandRequest]) =>
+      request.argv.join(" ").includes("ln -s"),
+    );
+    expect(link?.[1].argv).toEqual([
+      "bash",
+      "-eu",
+      "-c",
+      expect.stringContaining("ln -s ../../shared shared"),
+      "bash",
+      "bots/bot-1",
+    ]);
+    // The fake sandbox runs no shell, so prove the script's own behavior against a real tree.
+    const script = link?.[1].argv[3] as string;
+    const root = await mkdtemp(path.join(tmpdir(), "rakazo-team-shared-"));
+    roots.push(root);
+    await mkdir(path.join(root, "shared"));
+    const run = (bot: string) =>
+      execFileSync("bash", ["-eu", "-c", script, "bash", bot], { cwd: root });
+    // A fresh bot home gets the link; both spellings then read the same directory.
+    await mkdir(path.join(root, "bots", "bot-1"), { recursive: true });
+    await writeFile(path.join(root, "shared", "brief.md"), "team");
+    run("bots/bot-1");
+    expect((await lstat(path.join(root, "bots", "bot-1", "shared"))).isSymbolicLink()).toBe(true);
+    expect(await readFile(path.join(root, "bots", "bot-1", "shared", "brief.md"), "utf8")).toBe(
+      "team",
+    );
+    // A bot-made folder of the same name is never replaced; an operator merges it.
+    await mkdir(path.join(root, "bots", "bot-2", "shared"), { recursive: true });
+    execFileSync("bash", ["-eu", "-c", script, "bash", "bots/bot-2"], { cwd: root });
+    expect((await lstat(path.join(root, "bots", "bot-2", "shared"))).isDirectory()).toBe(true);
+    expect((await lstat(path.join(root, "bots", "bot-2", "shared"))).isSymbolicLink()).toBe(false);
+  });
+
   it("leaves deleted bots' folders and browser profiles out of a Team Computer checkpoint", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "rakazo-workspace-store-"));
     roots.push(root);

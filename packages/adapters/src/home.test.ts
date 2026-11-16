@@ -548,6 +548,16 @@ describe("LocalAgentHomeStore path containment", () => {
     await store.commit("bot-2", dest, context);
     expect(await readFile(path.join(store.pathFor("bot-2"), "nested/run"))).toEqual(bytes);
   });
+
+  it("exports a folder alias once, at the folder's own path", async () => {
+    const { store, home } = await fixture();
+    await mkdir(path.join(home, "shared/inner"), { recursive: true });
+    await writeFile(path.join(home, "shared/inner/brief.md"), "team");
+    await mkdir(path.join(home, "bots/bot-1"), { recursive: true });
+    await symlink("../../shared", path.join(home, "bots/bot-1/shared"));
+
+    expect(await exported(store)).toEqual([{ path: "shared/inner/brief.md", content: "team" }]);
+  });
 });
 
 describe("LocalAgentHomeStore with Go's read-only module cache", () => {

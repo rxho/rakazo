@@ -703,6 +703,15 @@ async function* walkFiles(
   for (const entry of entries) {
     const portablePath = path.posix.join(outputPath, entry.name);
     if (skipHidden && portablePath.startsWith(".")) continue;
+    if (entry.isSymbolicLink()) {
+      const resolved = await resolveExportPath(path.join(resolvedCurrent, entry.name));
+      // A link to another folder of the home is an alias, not a second copy: the folder
+      // exports its files at its own path, and following the alias would duplicate or
+      // displace them. Links to files still export as copies.
+      if (resolved && isContained(root, resolved) && (await stat(resolved)).isDirectory()) {
+        continue;
+      }
+    }
     const full = await exportTarget(root, path.join(resolvedCurrent, entry.name), skipHidden);
     if (!full) continue;
     const info = await stat(full);

@@ -114,6 +114,43 @@ export async function ensureComputerWorkspaceLayout(
     { action: "ensure", paths: ["shared", teamBotWorkspaceDirectory(botId)] },
     context,
   );
+  await linkTeamSharedIntoBotHome(sandbox, computer, botId, context);
+}
+
+/**
+ * File tools resolve shared/ from the Team root, but a bot's shell starts in its home, so the
+ * same written path names two directories. A symlink in the bot's home makes both views the
+ * same one; a directory that already exists there is left for an operator to merge.
+ */
+const LINK_TEAM_SHARED = [
+  'bot="$1"',
+  'cd -- "$bot" || exit 1',
+  "if [ -e shared ] || [ -L shared ]; then exit 0; fi",
+  "ln -s ../../shared shared",
+].join("\n");
+
+async function linkTeamSharedIntoBotHome(
+  sandbox: SandboxProvider,
+  computer: ComputerRef,
+  botId: string,
+  context: AdapterContext,
+): Promise<void> {
+  let exitCode: number | undefined;
+  let stderr = "";
+  for await (const event of sandbox.execute(
+    computer,
+    {
+      argv: ["bash", "-eu", "-c", LINK_TEAM_SHARED, "bash", teamBotWorkspaceDirectory(botId)],
+      cwd: ".",
+    },
+    context,
+  )) {
+    if (event.type === "stderr") stderr += event.data;
+    if (event.type === "exit") exitCode = event.code;
+  }
+  if (exitCode !== 0) {
+    throw new Error(`Could not link the bot's shared folder${stderr ? `: ${stderr.trim()}` : ""}`);
+  }
 }
 
 const TEAM_BOT_FOLDER_NAME = /^[A-Za-z0-9_-]+$/;
