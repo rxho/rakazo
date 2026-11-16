@@ -3,7 +3,7 @@ import { useLingui } from "@lingui/react/macro";
 import { replyAttachment } from "@rakazo/core";
 import type { ReactNode } from "react";
 import { useContext, useEffect, useRef } from "react";
-import { Image, Platform, Pressable, Text, View } from "react-native";
+import { Image, Platform, Pressable, Text, useWindowDimensions, View } from "react-native";
 import { KeyboardController, useKeyboardHandler } from "react-native-keyboard-controller";
 import Animated, { interpolate, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -56,6 +56,7 @@ export function ThreadComposerDock({
   children: ReactNode;
 }) {
   const tokens = mobileTokens();
+  const window = useWindowDimensions();
   const { t } = useLingui();
   const insets = useSafeAreaInsets();
   const rootOwnsBottom = useContext(CallKeyboardContext);
@@ -106,7 +107,15 @@ export function ThreadComposerDock({
     <View
       pointerEvents="box-none"
       style={[
-        { position: "absolute", left: 0, right: 0, bottom: 0, maxHeight: "100%" },
+        {
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          // A dock taller than the screen's share pushes its own bottom behind the keyboard
+          // when insets race a heavy layout; bounded, it can only overflow into the list.
+          maxHeight: Math.round(window.height * 0.45),
+        },
         columnPadding,
       ]}
     >
