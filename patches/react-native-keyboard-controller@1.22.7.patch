@@ -1,0 +1,65 @@
+diff --git a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
+index 6eb3817789f89c684d4b5e1830b21a9cc4b2ba03..869334947baa35132ca84547bdcdb909345e1a9a 100644
+--- a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
++++ b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
+@@ -1,5 +1,6 @@
+ package com.reactnativekeyboardcontroller.listeners
+ 
++import android.os.SystemClock
+ import android.view.View
+ import android.view.ViewTreeObserver.OnGlobalFocusChangeListener
+ import android.widget.EditText
+@@ -30,6 +31,7 @@ import kotlin.math.abs
+ 
+ private val TAG = KeyboardAnimationCallback::class.qualifiedName
+ private val isResizeHandledInCallbackMethods = Keyboard.IS_ANIMATION_EMULATED
++private const val STALE_TRANSITION_MS = 2_000L
+ 
+ private data class PendingKeyboardStartEvent(
+   val keyboardHeight: Double,
+@@ -68,6 +70,7 @@ class KeyboardAnimationCallback(
+   private var prevKeyboardHeight = getCurrentKeyboardHeight()
+   private var isKeyboardVisible = false
+   private var isTransitioning = false
++  private var transitionStartedAtMs = 0L
+   private var duration = 0
+   private var viewTagFocused = -1
+   private var pendingStartEvent: PendingKeyboardStartEvent? = null
+@@ -76,10 +79,17 @@ class KeyboardAnimationCallback(
+     get() = duration == -1
+   override var isSuspended: Boolean = false
+ 
++  private fun isTransitionStale(): Boolean =
++    isTransitioning && SystemClock.uptimeMillis() - transitionStartedAtMs > STALE_TRANSITION_MS
++
+   // listeners
+   private val focusListener =
+     OnGlobalFocusChangeListener { oldFocus, newFocus ->
+       if (newFocus is EditText) {
++        if (isTransitionStale()) {
++          Logger.w(TAG, "clearing stale keyboard transition on focus")
++          this.syncKeyboardPosition()
++        }
+         viewTagFocused = newFocus.id
+ 
+         // keyboard is visible and focus has been changed
+@@ -155,7 +165,10 @@ class KeyboardAnimationCallback(
+     //
+     // `InteractiveKeyboardProvider.isInteractive` detect case when keyboard moves
+     // because of the gesture
+-    val isMoving = isTransitioning || InteractiveKeyboardProvider.isInteractive
++    // A transition whose onEnd was lost (e.g. activity backgrounded mid-animation) latches
++    // isTransitioning and would block both sync paths below forever; past a grace window it
++    // no longer counts as moving. Interactive gestures keep their own flag.
++    val isMoving = !isTransitionStale() && (isTransitioning || InteractiveKeyboardProvider.isInteractive)
+     val isKeyboardFullyVisible = isKeyboardShown && !isMoving
+     // when keyboard is opened and we trigger a transition from screen A to screen B,
+     // then this method is getting called and we start dispatching events, and later original
+@@ -195,6 +208,7 @@ class KeyboardAnimationCallback(
+     }
+ 
+     isTransitioning = true
++    transitionStartedAtMs = SystemClock.uptimeMillis()
+   }
+ 
+   @Suppress("detekt:ReturnCount")
