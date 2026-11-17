@@ -1,5 +1,5 @@
 diff --git a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
-index 6eb3817..125fb99 100644
+index 6eb3817..0f34f53 100644
 --- a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
 +++ b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
 @@ -1,5 +1,6 @@
@@ -107,7 +107,7 @@ index 6eb3817..125fb99 100644
      val isKeyboardFullyVisible = isKeyboardShown && !isMoving
      // when keyboard is opened and we trigger a transition from screen A to screen B,
      // then this method is getting called and we start dispatching events, and later original
-@@ -166,9 +228,18 @@ class KeyboardAnimationCallback(
+@@ -166,17 +228,31 @@ class KeyboardAnimationCallback(
      // in this method
      val isKeyboardSizeEqual = this.persistentKeyboardHeight == keyboardHeight
  
@@ -129,7 +129,21 @@ index 6eb3817..125fb99 100644
  
        return insets
      }
-@@ -184,6 +255,8 @@ class KeyboardAnimationCallback(
+ 
+     // always verify insets, because sometimes default lifecycle methods may not be invoked
+     // (when we press "Share" on Android 16, when Modal closes keyboard, when permission Alert presented etc.)
++    // A cancelled open desyncs on visibility alone: the window briefly reported the
++    // keyboard visible when the animation started (memorizing it and emitting
++    // `willShow`), then returned to its starting height - every height already matches,
++    // so only the memorized visibility disagrees with the window.
+     val newHeight = getCurrentKeyboardHeight(insets)
+-    if (prevKeyboardHeight != newHeight && !isMoving && !isSuspended) {
++    val isVisibilityDesynced = isKeyboardVisible != isKeyboardVisible()
++    if ((prevKeyboardHeight != newHeight || isVisibilityDesynced) && !isMoving && !isSuspended) {
+       Logger.w(
+         TAG,
+         "detected desynchronized state - force updating it: $newHeight",
+@@ -184,6 +260,8 @@ class KeyboardAnimationCallback(
        this.syncKeyboardPosition(newHeight, newHeight > 0)
      }
  
@@ -138,7 +152,7 @@ index 6eb3817..125fb99 100644
      return insets
    }
  
-@@ -195,6 +268,7 @@ class KeyboardAnimationCallback(
+@@ -195,6 +273,7 @@ class KeyboardAnimationCallback(
      }
  
      isTransitioning = true
@@ -146,7 +160,7 @@ index 6eb3817..125fb99 100644
    }
  
    @Suppress("detekt:ReturnCount")
-@@ -262,6 +336,10 @@ class KeyboardAnimationCallback(
+@@ -262,6 +341,10 @@ class KeyboardAnimationCallback(
        return insets
      }
  
@@ -157,7 +171,7 @@ index 6eb3817..125fb99 100644
      // First we get the insets which are potentially deferred
      val typesInset = insets.getInsets(config.deferredInsetTypes)
      // Then we get the persistent inset types which are applied as padding during layout
-@@ -324,6 +402,7 @@ class KeyboardAnimationCallback(
+@@ -324,6 +407,7 @@ class KeyboardAnimationCallback(
      }
  
      isTransitioning = false
@@ -165,7 +179,7 @@ index 6eb3817..125fb99 100644
      duration = animation.durationMillis.toInt()
  
      val runnable =
-@@ -379,13 +458,24 @@ class KeyboardAnimationCallback(
+@@ -379,13 +463,24 @@ class KeyboardAnimationCallback(
      isVisible: Boolean? = null,
    ) {
      val keyboardHeight = height ?: getCurrentKeyboardHeight()
@@ -191,7 +205,7 @@ index 6eb3817..125fb99 100644
      context.emitEvent(
        "KeyboardController::" + if (!isKeyboardVisible) "keyboardDidHide" else "keyboardDidShow",
        getEventParams(keyboardHeight),
-@@ -414,6 +504,7 @@ class KeyboardAnimationCallback(
+@@ -414,6 +509,7 @@ class KeyboardAnimationCallback(
  
    fun destroy() {
      pendingStartEvent = null
@@ -201,10 +215,10 @@ index 6eb3817..125fb99 100644
    }
 diff --git a/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackSweepTest.kt b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackSweepTest.kt
 new file mode 100644
-index 0000000..64ef9fe
+index 0000000..c953720
 --- /dev/null
 +++ b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackSweepTest.kt
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,377 @@
 +package com.reactnativekeyboardcontroller.listeners
 +
 +import android.app.Activity
@@ -296,6 +310,13 @@ index 0000000..64ef9fe
 +  private val protections = listOf("none", "suspended", "gesture")
 +  private val triggers = listOf("insets", "recheck", "focus")
 +
++  // A cancelled open can only be staged where it starts and ends hidden at the same
++  // level: the window must be able to return to its starting height with nothing due.
++  private fun orphansFor(
++    initial: String,
++    target: Int,
++  ): List<String> = if (initial == "hidden" && target == 0) orphans + "cancelledOpen" else orphans
++
 +  @Before
 +  fun setUp() {
 +    activity = Robolectric.buildActivity(Activity::class.java).setup().get()
@@ -305,8 +326,8 @@ index 0000000..64ef9fe
 +  fun `every loss combination converges to the live window`() {
 +    val failures = mutableListOf<String>()
 +    for (initial in initials) {
-+      for (orphan in orphans) {
-+        for (target in targetsByInitial.getValue(initial)) {
++      for (target in targetsByInitial.getValue(initial)) {
++        for (orphan in orphansFor(initial, target)) {
 +          for (protection in protections) {
 +            for (trigger in triggers) {
 +              val cell = Cell(initial, orphan, target, protection, trigger)
@@ -343,16 +364,24 @@ index 0000000..64ef9fe
 +      runCatching { callback.syncKeyboardPosition(881.0, true) }
 +      stageRoot(root, 0)
 +      callback.onPrepare(imeAnimation())
-+      runCatching { callback.onStart(imeAnimation(), Bounds()) }
++      runCatching { callback.onStart(imeAnimation(), imeBounds()) }
 +      runCatching { callback.onEnd(imeAnimation()) }
 +    }
 +    stageRoot(root, cell.target)
 +
 +    // Deliver the loss: which lifecycle callbacks of the changing animation survive.
-+    if (cell.orphan != "none") {
++    if (cell.orphan == "cancelledOpen") {
++      // The open began while the window briefly reported the keyboard visible - `onStart`
++      // memorized it, persisted 881, and already emitted `willShow` - then the user
++      // cancelled and the lifecycle was lost with the window back at its starting height.
++      stageRoot(root, 881)
++      callback.onPrepare(imeAnimation())
++      runCatching { callback.onStart(imeAnimation(), imeBounds()) }
++      stageRoot(root, 0)
++    } else if (cell.orphan != "none") {
 +      callback.onPrepare(imeAnimation())
 +      if (cell.orphan == "endLost") {
-+        runCatching { callback.onStart(imeAnimation(), Bounds()) }
++        runCatching { callback.onStart(imeAnimation(), imeBounds()) }
 +      }
 +    }
 +
@@ -415,8 +444,9 @@ index 0000000..64ef9fe
 +    // Invariant 1: no latch survives a settled recovery. The one exception owes nothing:
 +    // a hide whose lifecycle was lost while the state already reads hidden and level - no
 +    // event is due, no height moved, and the next real transition or focus clears it.
++    // A cancelled open is never that case: it emitted `willShow` and memorized visible.
 +    val lingersOwingNothing =
-+      cell.target == 0 && cell.orphan != "none" && cell.initial != "shown881"
++      cell.target == 0 && cell.orphan != "none" && cell.orphan != "cancelledOpen" && cell.initial != "shown881"
 +    if (!lingersOwingNothing) {
 +      assertFalse("$cell: the latch must be cleared", field(callback, "isTransitioning") as Boolean)
 +    }
@@ -446,14 +476,20 @@ index 0000000..64ef9fe
 +    assertEquals("$cell: the JS height must match the live window", cell.target.toDouble(), js.height, 0.001)
 +  }
 +
-+  private fun applyProtection(cell: Cell, callback: KeyboardAnimationCallback) {
++  private fun applyProtection(
++    cell: Cell,
++    callback: KeyboardAnimationCallback,
++  ) {
 +    when (cell.protection) {
 +      "suspended" -> callback.suspend(true)
 +      "gesture" -> InteractiveKeyboardProvider.isInteractive = true
 +    }
 +  }
 +
-+  private fun releaseProtection(cell: Cell, callback: KeyboardAnimationCallback) {
++  private fun releaseProtection(
++    cell: Cell,
++    callback: KeyboardAnimationCallback,
++  ) {
 +    when (cell.protection) {
 +      "suspended" -> callback.suspend(false)
 +      "gesture" -> InteractiveKeyboardProvider.isInteractive = false
@@ -508,25 +544,30 @@ index 0000000..64ef9fe
 +  private fun imeAnimation(): WindowInsetsAnimationCompat =
 +    WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 300)
 +
-+  private fun Bounds(): WindowInsetsAnimationCompat.BoundsCompat =
++  private fun imeBounds(): WindowInsetsAnimationCompat.BoundsCompat =
 +    WindowInsetsAnimationCompat.BoundsCompat(Insets.NONE, Insets.NONE)
 +
 +  private fun insetsFor(target: Int): WindowInsetsCompat =
 +    if (target > 0) {
-+      WindowInsetsCompat.Builder()
++      WindowInsetsCompat
++        .Builder()
 +        .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, target))
 +        .setVisible(WindowInsetsCompat.Type.ime(), true)
 +        .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.NONE)
 +        .build()
 +    } else {
-+      WindowInsetsCompat.Builder()
++      WindowInsetsCompat
++        .Builder()
 +        .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
 +        .setVisible(WindowInsetsCompat.Type.ime(), false)
 +        .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.NONE)
 +        .build()
 +    }
 +
-+  private fun stageRoot(root: FrameLayout, target: Int) {
++  private fun stageRoot(
++    root: FrameLayout,
++    target: Int,
++  ) {
 +    val impl = View::class.java.getMethod("getViewRootImpl").invoke(root)
 +    val field = impl.javaClass.getDeclaredField("mLastWindowInsets")
 +    field.isAccessible = true
@@ -557,10 +598,10 @@ index 0000000..64ef9fe
 +}
 diff --git a/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
 new file mode 100644
-index 0000000..e8c9540
+index 0000000..28d97f4
 --- /dev/null
 +++ b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
-@@ -0,0 +1,454 @@
+@@ -0,0 +1,497 @@
 +package com.reactnativekeyboardcontroller.listeners
 +
 +import android.app.Activity
@@ -864,6 +905,43 @@ index 0000000..e8c9540
 +  }
 +
 +  @Test
++  fun `a cancelled open back to zero still recovers to hidden`() {
++    // Consume the setup traversal before it can restage the root (see the grace-window
++    // test): the staged insets below must survive until the dispatch.
++    shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(50))
++
++    // The window briefly reported the keyboard visible when the open animation started:
++    // `onStart` memorized it as visible, persisted 881, and already emitted `willShow`.
++    // The user then cancelled, the window returned to 0, and the lifecycle lost its
++    // `onEnd` - every tracked height already reads 0, so only the memorized visibility
++    // is left stranded.
++    stageRootInsets(heightPx = 881)
++    callback.onPrepare(imeAnimation())
++    runCatching {
++      callback.onStart(imeAnimation(), WindowInsetsAnimationCompat.BoundsCompat(Insets.NONE, Insets.NONE))
++    }
++    assertEquals(
++      "the open start must have announced the briefly visible keyboard",
++      listOf<Pair<String, Double?>>("KeyboardController::keyboardWillShow" to 881.0),
++      reactContext.events,
++    )
++
++    stageHiddenRootInsets()
++    SystemClock.sleep(2_600)
++    reactContext.events.clear()
++    runCatching { callback.onApplyWindowInsets(root, hiddenImeInsets()) }
++
++    assertFalse("a cancelled open must not stay latched", field("isTransitioning") as Boolean)
++    assertEquals("the tracked height must read the hidden window", 0.0, field("prevKeyboardHeight"))
++    assertEquals("the persisted height must read the hidden window", 0.0, field("persistentKeyboardHeight"))
++    assertEquals(
++      "JS only hears `didHide` on close - the recovery must emit it, or it stays stuck visible",
++      listOf<Pair<String, Double?>>("KeyboardController::keyboardDidHide" to 0.0),
++      reactContext.events,
++    )
++  }
++
++  @Test
 +  fun `a deferred recheck trusts the live window over the captured insets`() {
 +    // Consume the setup traversal before it can restage the root (see the grace-window
 +    // test): the window the recheck reads must stay the one staged below.
@@ -938,14 +1016,16 @@ index 0000000..e8c9540
 +  }
 +
 +  private fun visibleImeInsets(heightPx: Int): WindowInsetsCompat =
-+    WindowInsetsCompat.Builder()
++    WindowInsetsCompat
++      .Builder()
 +      .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, heightPx))
 +      .setVisible(WindowInsetsCompat.Type.ime(), true)
 +      .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.NONE)
 +      .build()
 +
 +  private fun hiddenImeInsets(): WindowInsetsCompat =
-+    WindowInsetsCompat.Builder()
++    WindowInsetsCompat
++      .Builder()
 +      .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
 +      .setVisible(WindowInsetsCompat.Type.ime(), false)
 +      .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.NONE)
@@ -953,14 +1033,18 @@ index 0000000..e8c9540
 +
 +  private fun applyImeInsets(heightPx: Int) {
 +    val insets =
-+      WindowInsetsCompat.Builder()
++      WindowInsetsCompat
++        .Builder()
 +        .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, heightPx))
 +        .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.NONE)
 +        .build()
 +    runCatching { callback.onApplyWindowInsets(root, insets) }
 +  }
 +
-+  private fun dispatchFocus(oldFocus: View, newFocus: View) {
++  private fun dispatchFocus(
++    oldFocus: View,
++    newFocus: View,
++  ) {
 +    // The framework's focus dispatch is hidden from unit tests, so the registered
 +    // listener is invoked the way the framework would have.
 +    val listener =
