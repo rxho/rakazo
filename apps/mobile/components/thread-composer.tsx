@@ -426,7 +426,7 @@ export function ThreadComposer({
   }
 
   const composerPillStyle = {
-    width: 36,
+    width: 32,
     height: 28,
     borderRadius: 14,
     alignItems: "center",
@@ -578,7 +578,7 @@ export function ThreadComposer({
           ))}
         </ScrollView>
       ) : null}
-      <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10, marginTop: 8 }}>
+      <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8, marginTop: 8 }}>
         <MenuView
           actions={attachActions}
           colorScheme={colorScheme}
@@ -588,7 +588,7 @@ export function ThreadComposer({
             accessible
             accessibilityRole="button"
             accessibilityLabel={t`Attach file`}
-            style={{ width: 44, height: 44, marginBottom: (lineHeight - 44) / 2 }}
+            style={{ width: 38, height: 38, marginBottom: (lineHeight - 38) / 2 }}
           >
             {/* The 44pt box stays the touch target; a smaller circle leaves the text the hero. */}
             <View style={{ width: 36, height: 36, alignSelf: "center" }}>
@@ -612,7 +612,7 @@ export function ThreadComposer({
             alignItems: "flex-end",
             // Keeps text clear of the call/send pill even when it runs to the trailing edge (RTL).
             gap: 8,
-            paddingStart: 16,
+            paddingStart: 14,
             paddingEnd: 8,
           }}
           fallbackStyle={styles.composerFill}
