@@ -7,7 +7,10 @@ vi.mock("./live-notifications.js", () => ({
 }));
 vi.mock("./network-cache.js", () => ({ clearNetworkCache: vi.fn() }));
 vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
-vi.mock("expo-constants", () => ({ default: { easConfig: { projectId: "fake-project" } } }));
+const constantsState = vi.hoisted(() => ({
+  easConfig: { projectId: "fake-project" as string | undefined },
+}));
+vi.mock("expo-constants", () => ({ default: constantsState }));
 vi.mock("expo-modules-core", () => ({ requireOptionalNativeModule: vi.fn(() => null) }));
 
 // Expo runs every module's async functions on one serial native queue, so a call
@@ -169,6 +172,30 @@ it("syncs the native session before the server can push", async () => {
     await registration;
   }
   expect(fetch).toHaveBeenCalledWith(
+    expect.stringMatching(/notifications\/registerPush$/),
+    expect.anything(),
+  );
+});
+
+it("resumes the native session when this build has no Expo project", async () => {
+  Platform.OS = "android";
+  vi.mocked(Notifications.getPermissionsAsync).mockResolvedValue({ granted: true } as never);
+  // A self-hosted build without Expo credentials: no push token can be minted, yet the
+  // native poller still has to come back after the process died.
+  constantsState.easConfig.projectId = undefined;
+  try {
+    await registerPushToken();
+  } finally {
+    constantsState.easConfig.projectId = "fake-project";
+  }
+
+  expect(resumeLiveNotifications).toHaveBeenCalledExactlyOnceWith(
+    "http://127.0.0.1:3100",
+    "fake-session",
+    expect.any(String),
+  );
+  expect(Notifications.getExpoPushTokenAsync).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalledWith(
     expect.stringMatching(/notifications\/registerPush$/),
     expect.anything(),
   );

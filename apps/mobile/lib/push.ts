@@ -21,7 +21,20 @@ export async function registerPushToken() {
   if (!(await notificationsAllowed())) return;
   try {
     const projectId = Constants.easConfig?.projectId ?? Constants.expoConfig?.extra?.eas?.projectId;
-    if (!projectId) return;
+    if (!projectId) {
+      // Self-hosted builds without an Expo project cannot mint a push token, but the native
+      // notification session still has to resume: nothing else restarts the poller after the
+      // process dies, so the toggles would read on with nothing listening.
+      const generation = currentSessionGeneration();
+      const apiBase = currentApiBase();
+      const sessionToken = await loadSessionToken();
+      if (!sessionToken) return;
+      if (generation !== currentSessionGeneration() || apiBase !== currentApiBase()) return;
+      await resumeLiveNotifications(apiBase, sessionToken, selectedSpaceId() ?? "").catch(
+        () => undefined,
+      );
+      return;
+    }
     const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
     if (!token) return;
     const generation = currentSessionGeneration();
