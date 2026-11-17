@@ -1,5 +1,5 @@
 diff --git a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
-index 6eb3817..8693349 100644
+index 6eb3817..3ca368e 100644
 --- a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
 +++ b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
 @@ -1,5 +1,6 @@
@@ -25,7 +25,7 @@ index 6eb3817..8693349 100644
    private var duration = 0
    private var viewTagFocused = -1
    private var pendingStartEvent: PendingKeyboardStartEvent? = null
-@@ -76,10 +79,17 @@ class KeyboardAnimationCallback(
+@@ -76,12 +79,18 @@ class KeyboardAnimationCallback(
      get() = duration == -1
    override var isSuspended: Boolean = false
  
@@ -36,26 +36,30 @@ index 6eb3817..8693349 100644
    private val focusListener =
      OnGlobalFocusChangeListener { oldFocus, newFocus ->
        if (newFocus is EditText) {
+         viewTagFocused = newFocus.id
+-
 +        if (isTransitionStale()) {
 +          Logger.w(TAG, "clearing stale keyboard transition on focus")
 +          this.syncKeyboardPosition()
 +        }
-         viewTagFocused = newFocus.id
- 
          // keyboard is visible and focus has been changed
-@@ -155,7 +165,10 @@ class KeyboardAnimationCallback(
+         if (this.isKeyboardVisible && oldFocus !== null) {
+           // imitate iOS behavior and send two instant start/end events containing an info about new tag
+@@ -155,7 +164,12 @@ class KeyboardAnimationCallback(
      //
      // `InteractiveKeyboardProvider.isInteractive` detect case when keyboard moves
      // because of the gesture
 -    val isMoving = isTransitioning || InteractiveKeyboardProvider.isInteractive
 +    // A transition whose onEnd was lost (e.g. activity backgrounded mid-animation) latches
 +    // isTransitioning and would block both sync paths below forever; past a grace window it
-+    // no longer counts as moving. Interactive gestures keep their own flag.
-+    val isMoving = !isTransitionStale() && (isTransitioning || InteractiveKeyboardProvider.isInteractive)
++    // no longer counts as moving. The staleness applies to that latch only: an interactive
++    // gesture is moving for however long the finger stays down.
++    val isMoving =
++      (isTransitioning && !isTransitionStale()) || InteractiveKeyboardProvider.isInteractive
      val isKeyboardFullyVisible = isKeyboardShown && !isMoving
      // when keyboard is opened and we trigger a transition from screen A to screen B,
      // then this method is getting called and we start dispatching events, and later original
-@@ -195,6 +208,7 @@ class KeyboardAnimationCallback(
+@@ -195,6 +209,7 @@ class KeyboardAnimationCallback(
      }
  
      isTransitioning = true
@@ -65,10 +69,10 @@ index 6eb3817..8693349 100644
    @Suppress("detekt:ReturnCount")
 diff --git a/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
 new file mode 100644
-index 0000000..282bcb4
+index 0000000..658456b
 --- /dev/null
 +++ b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,147 @@
 +package com.reactnativekeyboardcontroller.listeners
 +
 +import android.app.Activity
@@ -83,6 +87,7 @@ index 0000000..282bcb4
 +import androidx.core.view.WindowInsetsCompat
 +import androidx.test.core.app.ApplicationProvider
 +import com.facebook.react.bridge.BridgeReactContext
++import com.reactnativekeyboardcontroller.interactive.InteractiveKeyboardProvider
 +import com.facebook.react.uimanager.ThemedReactContext
 +import com.facebook.react.views.view.ReactViewGroup
 +import org.junit.Assert.assertEquals
@@ -170,6 +175,19 @@ index 0000000..282bcb4
 +    dispatchFocus(oldFocus = root, newFocus = input)
 +
 +    assertFalse("refocusing an input must clear the latched transition", field("isTransitioning") as Boolean)
++  }
++
++  @Test
++  fun `an interactive gesture stays protected past the stale window`() {
++    callback.onPrepare(imeAnimation())
++    SystemClock.sleep(2_500)
++
++    // The user is still dragging the keyboard: the latch is stale, but the gesture is not.
++    InteractiveKeyboardProvider.isInteractive = true
++    applyImeInsets(heightPx = 881)
++    InteractiveKeyboardProvider.isInteractive = false
++
++    assertEquals("a live gesture must keep the resync suppressed", 0.0, field("prevKeyboardHeight"))
 +  }
 +
 +  private fun imeAnimation(): WindowInsetsAnimationCompat =
