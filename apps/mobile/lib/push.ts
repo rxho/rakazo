@@ -19,43 +19,34 @@ async function notificationsAllowed() {
 
 export async function registerPushToken() {
   if (!(await notificationsAllowed())) return;
+  const generation = currentSessionGeneration();
+  const apiBase = currentApiBase();
+  const sessionToken = await loadSessionToken();
+  // A sign-in still saving its token registers again once the session lands.
+  if (!sessionToken) return;
+  if (generation !== currentSessionGeneration() || apiBase !== currentApiBase()) return;
+  // Sync the native session before anything else, and also when no push token follows: a
+  // build whose Expo project lacks Firebase credentials (and one without a project at all)
+  // still relies on the native poller, and nothing else restarts it after the process dies.
+  // The server can push the moment a registration lands, before any Space load resumes
+  // native notifications, so this order keeps Android's signed-out drop rule seeing this
+  // account instead of the blank of a fresh sign-in. A rejected resume means native never
+  // stored this session: registering would have Android drop every push, so leave the
+  // token unregistered for the next attempt to retry. A server native notifications skip
+  // (public http) keeps no native session, so it gets plain pushes, which the drop rule
+  // never sees.
+  let nativeSession: boolean;
+  try {
+    nativeSession = await resumeLiveNotifications(apiBase, sessionToken, selectedSpaceId() ?? "");
+  } catch {
+    return;
+  }
   try {
     const projectId = Constants.easConfig?.projectId ?? Constants.expoConfig?.extra?.eas?.projectId;
-    if (!projectId) {
-      // Self-hosted builds without an Expo project cannot mint a push token, but the native
-      // notification session still has to resume: nothing else restarts the poller after the
-      // process dies, so the toggles would read on with nothing listening.
-      const generation = currentSessionGeneration();
-      const apiBase = currentApiBase();
-      const sessionToken = await loadSessionToken();
-      if (!sessionToken) return;
-      if (generation !== currentSessionGeneration() || apiBase !== currentApiBase()) return;
-      await resumeLiveNotifications(apiBase, sessionToken, selectedSpaceId() ?? "").catch(
-        () => undefined,
-      );
-      return;
-    }
+    if (!projectId) return;
     const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
     if (!token) return;
-    const generation = currentSessionGeneration();
-    const apiBase = currentApiBase();
-    const sessionToken = await loadSessionToken();
-    // A sign-in still saving its token registers again once the session lands.
-    if (!sessionToken) return;
     if (generation !== currentSessionGeneration() || apiBase !== currentApiBase()) return;
-    // The server can push the moment this registration lands, before any Space load
-    // resumes native notifications; sync the session first, so Android's signed-out
-    // drop rule sees this account instead of the blank of a fresh sign-in. A rejected
-    // resume means native never stored this session: registering would have Android
-    // drop every push, so leave the token unregistered for the next attempt to retry.
-    // A server native notifications skip (public http) keeps no native session, so it
-    // gets plain pushes, which the drop rule never sees.
-    let nativeSession: boolean;
-    try {
-      nativeSession = await resumeLiveNotifications(apiBase, sessionToken, selectedSpaceId() ?? "");
-    } catch {
-      return;
-    }
     await rpc("notifications/registerPush", {
       token,
       ...(Platform.OS === "android" &&

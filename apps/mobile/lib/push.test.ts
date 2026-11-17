@@ -201,6 +201,27 @@ it("resumes the native session when this build has no Expo project", async () =>
   );
 });
 
+it("resumes the native session when the push token cannot be minted", async () => {
+  Platform.OS = "android";
+  vi.mocked(Notifications.getPermissionsAsync).mockResolvedValue({ granted: true } as never);
+  // An upstream Expo project id without Firebase credentials in this build.
+  vi.mocked(Notifications.getExpoPushTokenAsync).mockRejectedValueOnce(
+    new Error("no Firebase config"),
+  );
+
+  await registerPushToken();
+
+  expect(resumeLiveNotifications).toHaveBeenCalledExactlyOnceWith(
+    "http://127.0.0.1:3100",
+    "fake-session",
+    expect.any(String),
+  );
+  expect(fetch).not.toHaveBeenCalledWith(
+    expect.stringMatching(/notifications\/registerPush$/),
+    expect.anything(),
+  );
+});
+
 it("does not restore a signed-out session while push registration loads its token", async () => {
   Platform.OS = "android";
   vi.mocked(Notifications.getPermissionsAsync).mockResolvedValue({ granted: true } as never);
