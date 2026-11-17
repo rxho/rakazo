@@ -1,5 +1,5 @@
 diff --git a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
-index 6eb3817789f89c684d4b5e1830b21a9cc4b2ba03..869334947baa35132ca84547bdcdb909345e1a9a 100644
+index 6eb3817..8693349 100644
 --- a/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
 +++ b/android/src/main/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallback.kt
 @@ -1,5 +1,6 @@
@@ -63,3 +63,142 @@ index 6eb3817789f89c684d4b5e1830b21a9cc4b2ba03..869334947baa35132ca84547bdcdb909
    }
  
    @Suppress("detekt:ReturnCount")
+diff --git a/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
+new file mode 100644
+index 0000000..282bcb4
+--- /dev/null
++++ b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
+@@ -0,0 +1,133 @@
++package com.reactnativekeyboardcontroller.listeners
++
++import android.app.Activity
++import android.content.Context
++import android.os.SystemClock
++import android.view.View
++import android.view.ViewTreeObserver
++import android.widget.EditText
++import android.widget.FrameLayout
++import androidx.core.graphics.Insets
++import androidx.core.view.WindowInsetsAnimationCompat
++import androidx.core.view.WindowInsetsCompat
++import androidx.test.core.app.ApplicationProvider
++import com.facebook.react.bridge.BridgeReactContext
++import com.facebook.react.uimanager.ThemedReactContext
++import com.facebook.react.views.view.ReactViewGroup
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.Robolectric
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++
++/**
++ * Covers the latched-transition deadlock: an insets animation that loses its `onEnd` (the app
++ * backgrounding mid-transition) leaves `isTransitioning` latched, which used to block both
++ * sync paths in `onApplyWindowInsets` forever. The keyboard height then goes stale and the
++ * avoiding UI ends up buried behind, or stranded above, the real keyboard.
++ *
++ * Event dispatch needs a live React Native runtime, which a unit test does not have; the
++ * asserted state is updated before any event is built, so the dispatch failure is contained
++ * and irrelevant to the assertions.
++ */
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [34], manifest = Config.NONE)
++class KeyboardAnimationCallbackTest {
++  private lateinit var root: FrameLayout
++  private lateinit var input: EditText
++  private lateinit var callback: KeyboardAnimationCallback
++
++  @Before
++  fun setUp() {
++    val controller = Robolectric.buildActivity(Activity::class.java).setup()
++    root = FrameLayout(controller.get())
++    input = EditText(controller.get())
++    root.addView(input)
++    controller.get().setContentView(root)
++
++    val appContext = ApplicationProvider.getApplicationContext<Context>()
++    val themedContext = ThemedReactContext(BridgeReactContext(appContext), appContext)
++    callback =
++      KeyboardAnimationCallback(
++        eventPropagationView = ReactViewGroup(themedContext),
++        view = root,
++        context = themedContext,
++        config =
++          KeyboardAnimationCallbackConfig(
++            persistentInsetTypes = WindowInsetsCompat.Type.systemBars(),
++            deferredInsetTypes = WindowInsetsCompat.Type.ime(),
++            hasTranslucentNavigationBar = false,
++          ),
++      )
++  }
++
++  @Test
++  fun `a transition still running keeps the height resync suppressed`() {
++    callback.onPrepare(imeAnimation())
++
++    // A real animation is in flight: the resync must not fire mid-animation.
++    applyImeInsets(heightPx = 881)
++
++    assertEquals("height must stay untouched mid-animation", 0.0, field("prevKeyboardHeight"))
++    assertTrue(field("isTransitioning") as Boolean)
++  }
++
++  @Test
++  fun `an orphaned transition no longer blocks the height resync`() {
++    callback.onPrepare(imeAnimation())
++
++    // The activity was backgrounded mid-animation and `onEnd` never arrived. No real
++    // insets animation outlives this window.
++    SystemClock.sleep(2_500)
++
++    // The IME changes its own height (e.g. a candidate bar expands) and insets re-dispatch.
++    applyImeInsets(heightPx = 881)
++
++    assertEquals("stale height must be resynced from the dispatched insets", 881.0, field("prevKeyboardHeight"))
++    assertFalse("a resync must reset the latched transition", field("isTransitioning") as Boolean)
++  }
++
++  @Test
++  fun `focusing an input clears an orphaned transition`() {
++    callback.onPrepare(imeAnimation())
++    SystemClock.sleep(2_500)
++
++    dispatchFocus(oldFocus = root, newFocus = input)
++
++    assertFalse("refocusing an input must clear the latched transition", field("isTransitioning") as Boolean)
++  }
++
++  private fun imeAnimation(): WindowInsetsAnimationCompat =
++    WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 300)
++
++  private fun applyImeInsets(heightPx: Int) {
++    val insets =
++      WindowInsetsCompat.Builder()
++        .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, heightPx))
++        .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.NONE)
++        .build()
++    runCatching { callback.onApplyWindowInsets(root, insets) }
++  }
++
++  private fun dispatchFocus(oldFocus: View, newFocus: View) {
++    // The framework's focus dispatch is hidden from unit tests, so the registered
++    // listener is invoked the way the framework would have.
++    val listener =
++      KeyboardAnimationCallback::class.java
++        .getDeclaredField("focusListener")
++        .apply { isAccessible = true }
++        .get(callback) as ViewTreeObserver.OnGlobalFocusChangeListener
++    runCatching { listener.onGlobalFocusChanged(oldFocus, newFocus) }
++  }
++
++  @Suppress("SameParameterValue")
++  private fun field(name: String): Any? {
++    val declared = KeyboardAnimationCallback::class.java.getDeclaredField(name)
++    declared.isAccessible = true
++    return declared.get(callback)
++  }
++}
