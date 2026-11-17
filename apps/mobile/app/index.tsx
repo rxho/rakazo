@@ -250,6 +250,12 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
   useEffect(() => {
     if (!hasSession || onShareSelect) return;
     void registerPushToken().catch(() => undefined);
+    // Android retires the notification poller about a minute after the app leaves the
+    // foreground; coming back re-arms it before the next run needs watching.
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") void registerPushToken().catch(() => undefined);
+    });
+    return () => subscription.remove();
   }, [hasSession, onShareSelect]);
 
   // Show the inbox saved on this device until the first live load replaces it.

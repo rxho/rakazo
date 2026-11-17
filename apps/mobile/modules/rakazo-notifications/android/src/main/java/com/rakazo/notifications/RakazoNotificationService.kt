@@ -124,6 +124,7 @@ class RakazoNotificationService : Service() {
         stopIfCurrent(generation)
         return
       }
+      var idleSincePoll = false
       val seeded = prepareHistorySpace(generation, storage.endpoint, storage.spaceId, token) ?: return
       val copyContext = localizedContext(this, storage.locale)
       var recentPageBusy = true
@@ -198,13 +199,8 @@ class RakazoNotificationService : Service() {
             return
           }
         }
-        if (working.isEmpty()) {
-          // Expo push owns background completion and attention delivery. Keeping this service
-          // foreground while idle would require the persistent notification the product avoids.
-          stopIfCurrent(generation)
-          return
-        }
         cadence.success()
+        idleSincePoll = working.isEmpty()
       } catch (error: ApiException) {
         if (error.status == 401) {
           stopIfCurrent(generation)
@@ -220,6 +216,7 @@ class RakazoNotificationService : Service() {
         SystemClock.elapsedRealtime() - startedAt,
         recentPageBusy,
         if (cadence.hasFailures) Random.nextLong(0, 1_000) else 0,
+        idle = idleSincePoll,
       )
       delay(delayMs)
     }

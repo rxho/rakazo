@@ -45,12 +45,14 @@ describe("Android mobile platform contract", () => {
     const service = readFileSync(resolve(nativeRoot, "RakazoNotificationService.kt"), "utf8");
     const module = readFileSync(resolve(nativeRoot, "RakazoNotificationsModule.kt"), "utf8");
     const allowlist = readFileSync(resolve(nativeRoot, "EndpointAllowlist.kt"), "utf8");
+    const polling = readFileSync(resolve(nativeRoot, "NotificationPolling.kt"), "utf8");
     expect(service).toContain("android.requestPromotedOngoing");
     expect(service).toContain("liveStatusIcon(primary, avatarStyle)");
     expect(service).toContain('rpc(endpoint, token, spaceId, headers, "me"');
     expect(service).not.toContain("showStarting");
     expect(service).not.toContain("catch (_: IOException) {\n        stop()");
-    expect(service).toContain("Expo push owns background completion and attention delivery");
+    expect(polling).toContain("a run started anywhere (the web app, a routine) still");
+    expect(polling).toContain("180_000L + jitterMs");
     expect(service).toContain("isAllowedNotificationEndpoint(storage.endpoint)");
     expect(service).toContain("if (!isAllowedNotificationEndpoint(endpoint)) throw IOException");
     expect(module).toContain("android.settings.APP_NOTIFICATION_PROMOTION_SETTINGS");
@@ -131,7 +133,11 @@ describe("Android mobile platform contract", () => {
       /private fun showLive\(active: List<RunRecord>[\s\S]*val primary = active\.first\(\)/,
     );
     expect(service).toContain('putString("rakazo.botId", run.botId)');
-    expect(service).toMatch(/if \(working\.isEmpty\(\)\) \{[\s\S]*stop\(\)[\s\S]*return[\s\S]*\}/);
+    // An idle space keeps a slow watch instead of stopping: without a push channel only
+    // the poller notices a run started elsewhere, and the first working run promotes the
+    // service back to foreground.
+    expect(service).toContain("idleSincePoll = working.isEmpty()");
+    expect(service).toContain("idle = idleSincePoll");
   });
 
   it("keeps markdown boundary checks portable to Android and preserves Unicode whitespace edges", () => {

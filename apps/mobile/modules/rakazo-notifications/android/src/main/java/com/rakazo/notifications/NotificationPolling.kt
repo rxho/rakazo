@@ -148,8 +148,14 @@ internal class PollCadence {
     failures = 0
   }
 
-  fun delayMs(elapsedMs: Long, recentPageBusy: Boolean, jitterMs: Long): Long =
-    if (hasFailures) {
+  fun delayMs(elapsedMs: Long, recentPageBusy: Boolean, jitterMs: Long, idle: Boolean = false): Long =
+    if (idle) {
+      // Nothing is running, yet a run started anywhere (the web app, a routine) still
+      // deserves its completion notification, and without a push channel only this
+      // poller can notice it - so an idle space keeps a slow watch instead of
+      // stopping. The first working run promotes the service to foreground again.
+      180_000L + jitterMs
+    } else if (hasFailures) {
       minOf(120_000L, 30_000L * (1L shl failures)) + jitterMs
     } else {
       // A reopened app or a bounded page filling with new completions polls quickly.
