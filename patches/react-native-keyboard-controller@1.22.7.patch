@@ -92,10 +92,10 @@ index 6eb3817..a6ed1d1 100644
      pendingStartEvent = null
 diff --git a/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
 new file mode 100644
-index 0000000..14c068c
+index 0000000..95bdf6c
 --- /dev/null
 +++ b/android/src/test/java/com/reactnativekeyboardcontroller/listeners/KeyboardAnimationCallbackTest.kt
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,200 @@
 +package com.reactnativekeyboardcontroller.listeners
 +
 +import android.app.Activity
@@ -203,14 +203,17 @@ index 0000000..14c068c
 +  @Test
 +  fun `a visible keyboard resizes through a stale latch and catches up fully`() {
 +    // The keyboard opened at 881 and a later resize animation lost its onEnd.
-+    root.dispatchApplyWindowInsets(visibleImeInsets(heightPx = 881).toWindowInsets()!!)
++    stageRootInsets(heightPx = 881)
 +    callback.onPrepare(imeAnimation())
 +    runCatching {
 +      callback.onStart(imeAnimation(), WindowInsetsAnimationCompat.BoundsCompat(Insets.NONE, Insets.NONE))
 +    }
 +    SystemClock.sleep(2_500)
 +
-+    // The IME grew (a candidate bar expanded) and insets re-dispatched.
++    // The IME grew (a candidate bar expanded): the root reports the new height, the
++    // callback still tracks the old one, and insets re-dispatch with the same values —
++    // the exact precondition of the resize branch.
++    stageRootInsets(heightPx = 1080)
 +    runCatching { callback.onApplyWindowInsets(root, visibleImeInsets(heightPx = 1080)) }
 +
 +    assertFalse("the resize path must clear the latched transition", field("isTransitioning") as Boolean)
@@ -246,6 +249,18 @@ index 0000000..14c068c
 +
 +  private fun imeAnimation(): WindowInsetsAnimationCompat =
 +    WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 300)
++
++  /**
++   * Robolectric's `dispatchApplyWindowInsets` does not populate what `getRootWindowInsets`
++   * returns (the callback's height and visibility reads), so the insets a real dispatch
++   * would leave on the root are placed there directly.
++   */
++  private fun stageRootInsets(heightPx: Int) {
++    val impl = View::class.java.getMethod("getViewRootImpl").invoke(root)
++    val field = impl.javaClass.getDeclaredField("mLastWindowInsets")
++    field.isAccessible = true
++    field.set(impl, visibleImeInsets(heightPx).toWindowInsets()!!)
++  }
 +
 +  private fun visibleImeInsets(heightPx: Int): WindowInsetsCompat =
 +    WindowInsetsCompat.Builder()
