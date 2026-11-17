@@ -590,13 +590,16 @@ export function ThreadComposer({
             accessibilityLabel={t`Attach file`}
             style={{ width: 44, height: 44, marginBottom: (lineHeight - 44) / 2 }}
           >
-            <GlassSurface
-              shape="circle"
-              style={styles.circleButton}
-              fallbackStyle={styles.composerFill}
-            >
-              <NativeSymbol ios="plus" android="add" size={18} color={tokens.mutedForeground} />
-            </GlassSurface>
+            {/* The 44pt box stays the touch target; a smaller circle leaves the text the hero. */}
+            <View style={{ width: 36, height: 36, alignSelf: "center" }}>
+              <GlassSurface
+                shape="circle"
+                style={styles.circleButton}
+                fallbackStyle={styles.composerFill}
+              >
+                <NativeSymbol ios="plus" android="add" size={16} color={tokens.mutedForeground} />
+              </GlassSurface>
+            </View>
           </View>
         </MenuView>
         <GlassSurface
@@ -796,7 +799,9 @@ export function ThreadComposer({
               </TextInput>
             </Pressable>
           </View>
-          {onCall ? null : (
+          {/* Once typing owns the box the dictate pill only narrows it, and the keyboard has its
+              own voice input; the pill stays within reach while it can still start or stop. */}
+          {onCall || (dictation.status === "idle" && draft.length > 0) ? null : (
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={dictation.status === "idle" ? t`Dictate` : t`Stop dictating`}

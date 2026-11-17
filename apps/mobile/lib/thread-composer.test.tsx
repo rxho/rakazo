@@ -1223,16 +1223,26 @@ describe("thread composer isolation", () => {
     expect(props.startVoiceCall).toHaveBeenCalledOnce();
   });
 
-  it("adds dictated words after the draft, and drops them once the draft is edited", () => {
-    type("Remind me");
+  it("adds dictated words and drops them once the draft is edited", () => {
     press("Dictate");
     expect(dictation.toggle).toHaveBeenCalledOnce();
     act(() => dictation.onWords("to buy"));
     act(() => dictation.onWords("to buy milk"));
-    expect(container.querySelector("input")!.value).toBe("Remind me to buy milk");
-    type("Remind me to buy milk!");
+    expect(container.querySelector("input")!.value).toBe("to buy milk");
+    type("to buy milk!");
     act(() => dictation.onWords("to buy milk and eggs"));
-    expect(container.querySelector("input")!.value).toBe("Remind me to buy milk!");
+    expect(container.querySelector("input")!.value).toBe("to buy milk!");
+  });
+
+  it("keeps the dictate pill out of the box once text is being typed", () => {
+    const pill = (label: string) => container.querySelector(`button[aria-label="${label}"]`);
+    expect(pill("Dictate")).not.toBeNull();
+    type("Note");
+    expect(pill("Dictate")).toBeNull();
+    // A live dictation still needs its control, text or not.
+    dictation.status = "listening";
+    type("Note: milk");
+    expect(pill("Stop dictating")).not.toBeNull();
   });
 
   function sendButton() {
@@ -1258,8 +1268,8 @@ describe("thread composer isolation", () => {
   });
 
   it("adds a provider's transcript after text typed while it recorded", () => {
-    type("Note");
     press("Dictate");
+    type("Note");
     type("Note:");
     act(() => dictation.onWords("call the bank", true));
     expect(container.querySelector("input")!.value).toBe("Note: call the bank");
