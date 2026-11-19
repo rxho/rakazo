@@ -232,10 +232,13 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") forgetAppBadge();
+      if (state !== "active") return;
+      forgetAppBadge();
+      // The badge also has to catch up when a chat, not the inbox, owns the foreground.
+      if (hasSession) void loadBots().catch(() => undefined);
     });
     return () => subscription.remove();
-  }, []);
+  }, [hasSession, loadBots]);
 
   useEffect(() => {
     void Promise.all([loadSessionToken(), hasSignedInBefore()]).then(([token, before]) => {
@@ -278,6 +281,13 @@ function Home({ embedded, onSelectSpace, onShareSelect }: InboxPaneProps & { emb
   // The embedded pane is visible beside the chat, so it keeps polling even when
   // the chat route owns focus.
   const inboxShown = hasSession && (embedded || isFocused);
+  // A cold start can restore a chat with the inbox mounted underneath. Its poll is
+  // disabled there, but the unread state still has to clear a stale icon badge.
+  useEffect(() => {
+    if (!hasSession || inboxShown || badgeLoad !== null) return;
+    forgetAppBadge();
+    void loadBots().catch(() => undefined);
+  }, [badgeLoad, hasSession, inboxShown, loadBots]);
   const rosterSignalsLive = useRosterSignals(loadBots, inboxShown);
   useForegroundPoll(
     loadBots,
