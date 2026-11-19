@@ -1,4 +1,5 @@
 import * as Notifications from "expo-notifications";
+import { setNativeAppBadge } from "./live-notifications.js";
 
 type InboxChats = {
   bots: readonly { unread?: boolean }[];
@@ -32,7 +33,9 @@ export function forgetAppBadge(): void {
 export async function syncAppBadge(count: number): Promise<void> {
   if (count === written) return;
   written = count;
-  const set = await Notifications.setBadgeCountAsync(count).catch(() => false);
+  const set =
+    (await setNativeAppBadge(count)) ??
+    (await Notifications.setBadgeCountAsync(count).catch(() => false));
   if (!set && written === count) written = null;
 }
 

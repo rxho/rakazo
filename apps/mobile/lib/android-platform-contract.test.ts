@@ -48,6 +48,9 @@ describe("Android mobile platform contract", () => {
     const polling = readFileSync(resolve(nativeRoot, "NotificationPolling.kt"), "utf8");
     expect(service).toContain("android.requestPromotedOngoing");
     expect(service).toContain("liveStatusIcon(primary, avatarStyle)");
+    expect(service).toMatch(/Channels\.LIVE,[\s\S]*?setShowBadge\(false\)/);
+    expect(module).toContain('AsyncFunction("setAppBadge")');
+    expect(module).toContain("ShortcutBadger.applyCountOrThrow");
     expect(service).toContain('rpc(endpoint, token, spaceId, headers, "me"');
     expect(service).not.toContain("showStarting");
     expect(service).not.toContain("catch (_: IOException) {\n        stop()");

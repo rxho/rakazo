@@ -31,6 +31,7 @@ vi.mock("expo-secure-store", () => ({
   deleteItemAsync: vi.fn(),
 }));
 vi.mock("./live-notifications.js", () => ({
+  setNativeAppBadge: vi.fn(async () => undefined),
   stopLiveNotifications: vi.fn(async () => undefined),
 }));
 vi.mock("./thread-feedback.js", () => ({ clearFailedSends: vi.fn() }));

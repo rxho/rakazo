@@ -8,6 +8,7 @@ import android.provider.Settings
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import me.leolin.shortcutbadger.ShortcutBadger
 
 class RakazoNotificationsModule : Module() {
   private var incomingReceiver: android.content.BroadcastReceiver? = null
@@ -43,6 +44,15 @@ class RakazoNotificationsModule : Module() {
     AsyncFunction("finishAnswer") { id: String, success: Boolean -> IncomingCalls.end(context(), id) }
     AsyncFunction("clearIncomingCalls") { IncomingCalls.clear(context()) }
     AsyncFunction("incomingState") { mapOf("token" to "", "actions" to IncomingCalls.take(context()), "ringing" to IncomingCalls.ringing(context())) }
+    AsyncFunction("setAppBadge") { count: Int ->
+      runCatching {
+        val context = context()
+        // Expo's Android badge helper only cancels notifications at zero, leaving the
+        // launcher's explicit count untouched. Zero has to reach ShortcutBadger too.
+        if (count == 0) context.getSystemService(NotificationManager::class.java).cancelAll()
+        ShortcutBadger.applyCountOrThrow(context.applicationContext, count)
+      }.isSuccess
+    }
 
     AsyncFunction("getSettings") {
       NotificationStorage(context()).settings.toMap()

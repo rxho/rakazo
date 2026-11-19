@@ -51,6 +51,8 @@ type NativeNotifications = {
   openSettings(): Promise<void>;
   canPostPromotedNotifications(): Promise<boolean>;
   openPromotedSettings(): Promise<void>;
+  /** Missing on native builds that predate the explicit launcher write. */
+  setAppBadge?: (count: number) => Promise<boolean>;
   /** Missing on native builds that predate the check. */
   hasPromotedSettings?: () => boolean;
 };
@@ -59,6 +61,12 @@ const nativeNotifications =
   Platform.OS === "android"
     ? requireNativeModule<NativeNotifications>("RakazoNotifications")
     : null;
+
+/** Undefined lets older native builds keep Expo's badge behavior; false asks for a retry. */
+export async function setNativeAppBadge(count: number): Promise<boolean | undefined> {
+  if (!nativeNotifications?.setAppBadge) return undefined;
+  return nativeNotifications.setAppBadge(count).catch(() => false);
+}
 
 export type NotificationThreadTarget = { botId?: string; threadId?: string; groupId?: string };
 

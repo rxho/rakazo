@@ -1076,7 +1076,7 @@ internal fun createRakazoChannels(base: Context) {
       Channels.LIVE,
       context.getString(R.string.rakazo_channel_live),
       NotificationManager.IMPORTANCE_LOW,
-    ),
+    ).apply { setShowBadge(false) },
     NotificationChannel(
       Channels.MESSAGES,
       context.getString(R.string.rakazo_channel_messages),
